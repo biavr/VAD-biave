@@ -1,23 +1,34 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from mmcv.cnn import xavier_init
+from mmengine.model import xavier_init
+from mmengine.model import BaseModule
 from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
-from mmcv.runner.base_module import BaseModule
 
-from mmdet.models.utils.builder import TRANSFORMER
+from mmengine.registry import MODELS
 from torch.nn.init import normal_
 from projects.mmdet3d_plugin.models.utils.visual import save_tensor
-from mmcv.runner.base_module import BaseModule
 from torchvision.transforms.functional import rotate
 from .temporal_self_attention import TemporalSelfAttention
 from .spatial_cross_attention import MSDeformableAttention3D
 from .decoder import CustomMSDeformableAttention
 from projects.mmdet3d_plugin.models.utils.bricks import run_time
-from mmcv.runner import force_fp32, auto_fp16
+
+from mmengine.runner import autocast
+import functools
+# If you need to "force" it as a decorator for legacy code:
+def auto_fp16(apply_to=None, out_fp32=False):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # We ignore apply_to because modern autocast handles it globally
+            with autocast(device_type='cuda', enabled=True):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
-@TRANSFORMER.register_module()
+@MODELS.register_module()
 class PerceptionTransformer(BaseModule):
     """Implements the Detr3D transformer.
     Args:

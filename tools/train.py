@@ -3,8 +3,60 @@
 # ---------------------------------------------
 #  Modified by Zhiqi Li
 # ---------------------------------------------
- 
+
 from __future__ import division
+
+# --- THE INTERNAL VAD COMPATIBILITY PATCH ---
+import sys
+import types
+import os
+import torch
+import mmengine
+
+# 1. Bridge the Utilities
+import mmengine.utils
+sys.modules['mmcv.utils'] = mmengine.utils
+mmengine.utils.TORCH_VERSION = torch.__version__
+mmengine.utils.IS_CUDA_AVAILABLE = torch.cuda.is_available()
+mmengine.utils.IS_MLU_AVAILABLE = False
+mmengine.utils.IS_ROCM_AVAILABLE = False
+mmengine.utils.digit_version = mmengine.utils.digit_version
+
+# 2. Bridge the Runner (Dist + Load)
+runner_compat = types.ModuleType('mmcv.runner')
+import mmengine.dist
+import mmengine.hub
+runner_compat.get_dist_info = mmengine.dist.get_dist_info
+runner_compat.init_dist = mmengine.dist.init_dist
+runner_compat.load_url = lambda url, **kwargs: torch.hub.load_state_dict_from_url(url, **kwargs)
+sys.modules['mmcv.runner'] = runner_compat
+
+# 3. Bridge MMCV Main
+import mmcv
+mmcv.Config = mmengine.Config
+mmcv.print_log = mmengine.logging.print_log
+mmcv.DictAction = mmengine.ConfigDict
+
+# 4. Bridge the Extension Loader
+ext_loader = types.ModuleType('ext_loader')
+ext_loader.load_ext = lambda name, funcs: torch.ops.mmcv if hasattr(torch.ops, 'mmcv') else None
+
+# Inject into every possible path VAD might look
+sys.modules['mmcv.utils.ext_loader'] = ext_loader
+sys.modules['mmdet.utils.ext_loader'] = ext_loader
+sys.modules['mmdet3d.utils.ext_loader'] = ext_loader
+
+# NEW: This handles the relative import 'from ..utils import ext_loader' 
+# by pretending there is a top-level utils module with ext_loader in it
+import mmengine.utils
+mmengine.utils.ext_loader = ext_loader
+
+from mmdet.registry import MODELS
+from mmengine.logging import MMLogger
+from mmdet.utils.collect_env import collect_env
+
+print("✅ Internal Compatibility Patch Activated. Bypassing External Files.")
+# --------------------------------------------
 
 import argparse
 import copy
@@ -13,7 +65,7 @@ import os
 import time
 import torch
 import warnings
-from mmcv import Config, DictAction
+from mmengine import Config, DictAction
 from mmcv.runner import get_dist_info, init_dist
 from os import path as osp
 
@@ -21,10 +73,45 @@ from mmdet import __version__ as mmdet_version
 from mmdet3d import __version__ as mmdet3d_version
 #from mmdet3d.apis import train_model
 
-from mmdet3d.datasets import build_dataset
-from mmdet3d.models import build_model
-from mmdet3d.utils import collect_env, get_root_logger
-from mmdet.apis import set_random_seed
+# Old
+# from mmdet3d.datasets import build_dataset
+# New
+from mmdet3d.registry import DATASETS
+
+# Old
+# from mmdet3d.models import build_model
+# New
+from mmdet3d.registry import MODELS
+
+def build_model(cfg, train_cfg=None, test_cfg=None):
+    """Bridge for the missing build_model in MMDet3D 1.1+"""
+    # Modern MMEngine usually expects these inside the cfg dict
+    if train_cfg is not None:
+        cfg.setdefault('train_cfg', train_cfg)
+    if test_cfg is not None:
+        cfg.setdefault('test_cfg', test_cfg)
+    return MODELS.build(cfg)
+
+# Old
+# from mmdet3d.utils import collect_env, get_root_logger
+# New
+import mmengine.logging
+from mmengine.utils import get_git_hash
+from mmengine.utils.dl_utils import collect_env as mmengine_collect_env
+
+def manual_get_root_logger(log_file=None, log_level='INFO', name='mmdet'):
+    """Bridge for the missing get_root_logger in MMDet3D 1.1+"""
+    # MMEngine uses MMLogger.get_instance to manage loggers globally
+    return mmengine.logging.MMLogger.get_instance(name, log_file=log_file, log_level=log_level)
+
+# Inject them into mmdet3d.utils
+import mmdet3d.utils
+mmdet3d.utils.get_root_logger = manual_get_root_logger
+mmdet3d.utils.collect_env = mmengine_collect_env
+
+# Old
+from mmengine.runner import set_random_seed
+
 from mmseg import __version__ as mmseg_version
 
 from mmcv.utils import TORCH_VERSION, digit_version
@@ -104,19 +191,18 @@ def parse_args():
 
     return args
 
-
 def main():
+    print("Starting....")
     args = parse_args()
-
     cfg = Config.fromfile(args.config)
+    
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
     # import modules from string list.
     if cfg.get('custom_imports', None):
         from mmcv.utils import import_modules_from_strings
         import_modules_from_strings(**cfg['custom_imports'])
-
-    # import modules from plguin/xx, registry will be updated
+    # import modules from plugin/xx, registry will be updated
     if hasattr(cfg, 'plugin'):
         if cfg.plugin:
             import importlib
@@ -177,8 +263,11 @@ def main():
         _, world_size = get_dist_info()
         cfg.gpu_ids = range(world_size)
 
+    print("Create work dir...")
+    
     # create work_dir
-    mmcv.mkdir_or_exist(osp.abspath(cfg.work_dir))
+    from mmengine.utils import mkdir_or_exist
+    mkdir_or_exist(osp.abspath(cfg.work_dir))
     # dump config
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
     # init the logger before other steps
@@ -191,7 +280,7 @@ def main():
         logger_name = 'mmseg'
     else:
         logger_name = 'mmdet'
-    logger = get_root_logger(
+    logger = mmdet3d.utils.get_root_logger(
         log_file=log_file, log_level=cfg.log_level, name=logger_name)
 
     # init the meta dict to record some important information such as
@@ -208,8 +297,6 @@ def main():
 
     # log some basic info
     logger.info(f'Distributed training: {distributed}')
-    logger.info(f'Config:\n{cfg.pretty_text}')
-
     # set random seeds
     if args.seed is not None:
         logger.info(f'Set random seed to {args.seed}, '
@@ -218,16 +305,22 @@ def main():
     cfg.seed = args.seed
     meta['seed'] = args.seed
     meta['exp_name'] = osp.basename(args.config)
-
+    print("Building model...")
     model = build_model(
         cfg.model,
-        train_cfg=cfg.get('train_cfg'),
-        test_cfg=cfg.get('test_cfg'))
+        train_cfg=cfg.model.get('train_cfg'),
+        test_cfg=cfg.model.get('test_cfg'))
     model.init_weights()
+    # logger.info(f'Model:\n{model}')
 
-    logger.info(f'Model:\n{model}')
-    datasets = [build_dataset(cfg.data.train)]
+    print("Prepairing dataset...")
+    # Old
+    # datasets = [build_dataset(cfg.data.train)]
+    # New
+    datasets = DATASETS.build(cfg.train_dataloader.dataset)
+    logger.info(f"Dataset length: {len(datasets)}")
     if len(cfg.workflow) == 2:
+        print("Prepairing validation dataset...")
         val_dataset = copy.deepcopy(cfg.data.val)
         # in case we use a dataset wrapper
         if 'dataset' in cfg.data.train:
@@ -238,7 +331,11 @@ def main():
         # which do not affect AP/AR calculation later
         # refer to https://mmdetection3d.readthedocs.io/en/latest/tutorials/customize_runtime.html#customize-workflow  # noqa
         val_dataset.test_mode = False
-        datasets.append(build_dataset(val_dataset))
+        # datasets.append(DATASETS.build(val_dataset))
+    else:
+        print("No validation dataset specified in workflow, skipping validation setup.")
+        datasets = [datasets]
+    print("Configuring checkpoint...")
     if cfg.checkpoint_config is not None:
         # save mmdet version, config file content and class names in
         # checkpoints as meta data
@@ -252,6 +349,8 @@ def main():
             if hasattr(datasets[0], 'PALETTE') else None)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+    # print("Model.CLASSES: ", model.CLASSES)
+    logger.info("Start training...")
     custom_train_model(
         model,
         datasets,

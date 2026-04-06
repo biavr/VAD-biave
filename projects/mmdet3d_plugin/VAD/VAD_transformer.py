@@ -1,15 +1,12 @@
 import torch
 import numpy as np
 import torch.nn as nn
-from mmcv.cnn import xavier_init
+from mmengine.model import xavier_init, BaseModule
 from mmcv.utils import ext_loader
 from torch.nn.init import normal_
-from mmcv.runner.base_module import BaseModule
-from mmdet.models.utils.builder import TRANSFORMER
+from mmengine.registry import MODELS
 from torchvision.transforms.functional import rotate
-from mmcv.cnn.bricks.registry import TRANSFORMER_LAYER_SEQUENCE
-from mmcv.cnn.bricks.transformer import TransformerLayerSequence
-from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
+from mmcv.cnn.bricks.transformer import TransformerLayerSequence, build_transformer_layer_sequence
 
 from projects.mmdet3d_plugin.VAD.modules.decoder import CustomMSDeformableAttention
 from projects.mmdet3d_plugin.VAD.modules.temporal_self_attention import TemporalSelfAttention
@@ -37,7 +34,7 @@ def inverse_sigmoid(x, eps=1e-5):
     return torch.log(x1 / x2)
 
 
-@TRANSFORMER_LAYER_SEQUENCE.register_module()
+@MODELS.register_module()
 class MapDetectionTransformerDecoder(TransformerLayerSequence):
     """Implements the decoder in DETR3D transformer.
     Args:
@@ -117,7 +114,7 @@ class MapDetectionTransformerDecoder(TransformerLayerSequence):
         return output, reference_points
 
 
-@TRANSFORMER.register_module()
+@MODELS.register_module()
 class VADPerceptionTransformer(BaseModule):
     """Implements the Detr3D transformer.
     Args:
@@ -257,18 +254,31 @@ class VADPerceptionTransformer(BaseModule):
                     rotation_angle = kwargs['img_metas'][i]['can_bus'][-1]
                     tmp_prev_bev = prev_bev[:, i].reshape(
                         bev_h, bev_w, -1).permute(2, 0, 1)
-                    tmp_prev_bev = rotate(tmp_prev_bev, rotation_angle,
+                    tmp_prev_bev = rotate(tmp_prev_bev, float(rotation_angle),
                                           center=self.rotate_center)
                     tmp_prev_bev = tmp_prev_bev.permute(1, 2, 0).reshape(
                         bev_h * bev_w, 1, -1)
                     prev_bev[:, i] = tmp_prev_bev[:, 0]
 
         # add can bus signals
-        can_bus = bev_queries.new_tensor(
-            [each['can_bus'] for each in kwargs['img_metas']])  # [:, :]
+        # 1. Ensure can_bus data exists and is a tensor
+        can_bus_list = [each['can_bus'] for each in kwargs['img_metas']]
+        can_bus = bev_queries.new_tensor(can_bus_list) # Inherits device and default dtype
+        
+        # 2. MATCH DTYPE: Ensure can_bus matches the MLP weights (usually Float32)
+        mlp_dtype = self.can_bus_mlp[0].weight.dtype
+        can_bus = can_bus.to(mlp_dtype)
+        
+        # 3. Pass through MLP and adjust dimensions
         can_bus = self.can_bus_mlp(can_bus)[None, :, :]
-        bev_queries = bev_queries + can_bus * self.use_can_bus
-
+        
+        # 4. MATCH DTYPE AGAIN: Ensure result matches bev_queries for addition
+        bev_queries = bev_queries + can_bus.to(bev_queries.dtype) * self.use_can_bus
+        
+        # 5. Precision safety for prev_bev (History BEV)
+        if prev_bev is not None:
+            prev_bev = prev_bev.to(bev_queries.dtype)
+            
         feat_flatten = []
         spatial_shapes = []
         for lvl, feat in enumerate(mlvl_feats):
@@ -435,7 +445,7 @@ class VADPerceptionTransformer(BaseModule):
             map_inter_states, map_init_reference_out, map_inter_references_out)
 
 
-@TRANSFORMER_LAYER_SEQUENCE.register_module()
+@MODELS.register_module()
 class CustomTransformerDecoder(TransformerLayerSequence):
     """Implements the decoder in DETR3D transformer.
     Args:

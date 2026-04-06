@@ -6,16 +6,57 @@ import numpy as np
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from mmdet.models import HEADS, build_loss 
+from mmdet3d.registry import MODELS
 from mmdet.models.dense_heads import DETRHead
-from mmcv.runner import force_fp32, auto_fp16
+
+import functools
+from mmengine.runner import autocast
+
+# from mmdetection3d.projects.CenterFormer.centerformer import transformer
+
+# If you need to "force" it as a decorator for legacy code:
+def auto_fp16(apply_to=None, out_fp32=False):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # We ignore apply_to because modern autocast handles it globally
+            with autocast(device_type='cuda', enabled=True):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def force_fp32(apply_to=None, out_fp16=False):
+    """A robust manual fix for the missing decorator that actually casts inputs."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Recursive helper to cast all tensors to FP32
+            def to_fp32(x):
+                if isinstance(x, torch.Tensor):
+                    return x.float()
+                elif isinstance(x, (list, tuple)):
+                    return type(x)(to_fp32(v) for v in x)
+                elif isinstance(x, dict):
+                    return {k: to_fp32(v) for k, v in x.items()}
+                return x
+            
+            # Cast positional and keyword arguments
+            new_args = [to_fp32(a) for a in args]
+            new_kwargs = {k: to_fp32(v) for k, v in kwargs.items()}
+            
+            with autocast(device_type='cuda', enabled=False):
+                return func(*new_args, **new_kwargs)
+        return wrapper
+    return decorator
+
 from mmcv.utils import TORCH_VERSION, digit_version
-from mmdet.core import build_assigner, build_sampler
-from mmdet3d.core.bbox.coders import build_bbox_coder
-from mmdet.models.utils.transformer import inverse_sigmoid
-from mmdet.core.bbox.transforms import bbox_xyxy_to_cxcywh
-from mmcv.cnn import Linear, bias_init_with_prob, xavier_init
-from mmdet.core import (multi_apply, multi_apply, reduce_mean)
+from mmdet.models.task_modules import build_assigner, build_sampler, build_bbox_coder
+from mmdet.models.layers.transformer import inverse_sigmoid
+from mmdet.structures.bbox import bbox_xyxy_to_cxcywh
+from mmcv.cnn import Linear
+from mmengine.model import bias_init_with_prob, xavier_init
+from mmdet.models.utils import multi_apply, multi_apply
+from mmdet.utils import reduce_mean
 from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
 
 from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
@@ -69,7 +110,7 @@ class LaneNet(nn.Module):
         return x_max
 
 
-@HEADS.register_module()
+@MODELS.register_module()
 class VADHead(DETRHead):
     """Head of VAD model.
     Args:
@@ -112,7 +153,7 @@ class VADHead(DETRHead):
                  map_dir_interval=1,
                  map_code_size=None,
                  map_code_weights=None,
-                loss_map_cls=dict(
+                 loss_map_cls=dict(
                      type='CrossEntropyLoss',
                      bg_cls_weight=0.1,
                      use_sigmoid=False,
@@ -144,6 +185,7 @@ class VADHead(DETRHead):
                  query_thresh=None,
                  query_use_fix_pad=None,
                  ego_lcf_feat_idx=None,
+                 positional_encoding=None,
                  valid_fut_ts=6,
                  **kwargs):
 
@@ -169,6 +211,8 @@ class VADHead(DETRHead):
         self.query_use_fix_pad = query_use_fix_pad
         self.ego_lcf_feat_idx = ego_lcf_feat_idx
         self.valid_fut_ts = valid_fut_ts
+        
+        self.num_query = kwargs.get('num_query', 300)
 
         if loss_traj_cls['use_sigmoid'] == True:
             self.traj_num_cls = 1
@@ -243,7 +287,39 @@ class VADHead(DETRHead):
         
         self.traj_bg_cls_weight = 0
 
-        super(VADHead, self).__init__(*args, transformer=transformer, **kwargs)
+        # Hack to build the transformer first
+        if isinstance(transformer, dict):
+            from mmdet3d.registry import MODELS
+            built_transformer = MODELS.build(transformer)
+        else:
+            built_transformer = transformer
+        
+        self._temp_transformer = [built_transformer]
+
+        super(VADHead, self).__init__(num_classes=kwargs.get('num_classes'),
+                                     embed_dims=kwargs.get('embed_dims'),
+                                     num_reg_fcs=num_cls_fcs,
+                                     sync_cls_avg_factor=kwargs.get(
+                                            'sync_cls_avg_factor', False),
+                                     loss_cls=kwargs.get('loss_cls'),
+                                     loss_bbox=kwargs.get('loss_bbox'),
+                                     loss_iou=kwargs.get('loss_iou'),
+                                     train_cfg=kwargs.get('train_cfg'),
+                                     test_cfg=kwargs.get('test_cfg'),
+                                     init_cfg=kwargs.get('init_cfg'))
+
+        # super(VADHead, self).__init__(*args, transformer=transformer, **kwargs)
+        self.transformer = self._temp_transformer[0]
+
+        if positional_encoding is not None:
+            # Force the registry to look in the mmdet scope if not found in mmdet3d
+            if 'type' in positional_encoding and 'mmdet.' not in positional_encoding['type']:
+                positional_encoding['type'] = 'mmdet.' + positional_encoding['type']
+            
+            self.positional_encoding = MODELS.build(positional_encoding)
+        else:
+            self.positional_encoding = None
+
         self.code_weights = nn.Parameter(torch.tensor(
             self.code_weights, requires_grad=False), requires_grad=False)
         self.map_code_weights = nn.Parameter(torch.tensor(
@@ -271,17 +347,21 @@ class VADHead(DETRHead):
             sampler_cfg = dict(type='PseudoSampler')
             self.map_sampler = build_sampler(sampler_cfg, context=self)
         
-        self.loss_traj = build_loss(loss_traj)
-        self.loss_traj_cls = build_loss(loss_traj_cls)
-        self.loss_map_bbox = build_loss(loss_map_bbox)
-        self.loss_map_cls = build_loss(loss_map_cls)
-        self.loss_map_iou = build_loss(loss_map_iou)
-        self.loss_map_pts = build_loss(loss_map_pts)
-        self.loss_map_dir = build_loss(loss_map_dir)
-        self.loss_plan_reg = build_loss(loss_plan_reg)
-        self.loss_plan_bound = build_loss(loss_plan_bound)
-        self.loss_plan_col = build_loss(loss_plan_col)
-        self.loss_plan_dir = build_loss(loss_plan_dir)
+        self.loss_traj = MODELS.build(loss_traj)
+        self.loss_traj_cls = MODELS.build(loss_traj_cls)
+        self.loss_map_bbox = MODELS.build(loss_map_bbox)
+        self.loss_map_cls = MODELS.build(loss_map_cls)
+        self.loss_map_iou = MODELS.build(loss_map_iou)
+        self.loss_map_pts = MODELS.build(loss_map_pts)
+        self.loss_map_dir = MODELS.build(loss_map_dir)
+        self.loss_plan_reg = MODELS.build(loss_plan_reg)
+        self.loss_plan_bound = MODELS.build(loss_plan_bound)
+        self.loss_plan_col = MODELS.build(loss_plan_col)
+        self.loss_plan_dir = MODELS.build(loss_plan_dir)
+
+        self.add_module('transformer', self.transformer)
+        self._init_layers()
+        del self._temp_transformer
 
     def _init_layers(self):
         """Initialize classification branch and regression branch of head."""
@@ -336,12 +416,25 @@ class VADHead(DETRHead):
 
         # last reg_branch is used to generate proposal from
         # encode feature map when as_two_stage is True.
+
+        # Use transformer placeholder
+        # Hack to be able to have the transformer inside the nn.ModuleList
+        if hasattr(self, 'transformer'):
+            print("Using self.transformer for branch cloning")
+            transformer = self.transformer
+        elif hasattr(self, '_transformer_container'):
+            print("Using _transformer_container[0] for branch cloning")
+            transformer = self._transformer_container[0]
+        else:
+            print("No transformer found for branch cloning, skipping initialization of branches.")
+            return # Truly not ready
+
         num_decoder_layers = 1
         num_map_decoder_layers = 1
-        if self.transformer.decoder is not None:
-            num_decoder_layers = self.transformer.decoder.num_layers
-        if self.transformer.map_decoder is not None:
-            num_map_decoder_layers = self.transformer.map_decoder.num_layers
+        if transformer.decoder is not None:
+            num_decoder_layers = transformer.decoder.num_layers
+        if transformer.map_decoder is not None:
+            num_map_decoder_layers = transformer.map_decoder.num_layers
         num_motion_decoder_layers = 1
         num_pred = (num_decoder_layers + 1) if \
             self.as_two_stage else num_decoder_layers
@@ -431,7 +524,19 @@ class VADHead(DETRHead):
 
     def init_weights(self):
         """Initialize weights of the DeformDETR head."""
-        self.transformer.init_weights()
+        if hasattr(self, 'transformer') and isinstance(self.transformer, nn.Module):
+            print("Initialize transformer weights")
+            self.transformer.init_weights()
+        else:
+            print("No transformer to initialize weights for")
+
+        for m in self.cls_branches:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+                    print(">> VADHead: Initialized cls_branches with Xavier init.")
+        from mmengine.model import bias_init_with_prob
         if self.loss_cls.use_sigmoid:
             bias_init = bias_init_with_prob(0.01)
             for m in self.cls_branches:
@@ -517,7 +622,13 @@ class VADHead(DETRHead):
 
         bev_mask = torch.zeros((bs, self.bev_h, self.bev_w),
                                device=bev_queries.device).to(dtype)
-        bev_pos = self.positional_encoding(bev_mask).to(dtype)
+        if hasattr(self, 'positional_encoding'):
+            bev_pos = self.positional_encoding(bev_mask).to(dtype)
+        elif hasattr(self, 'transformer') and hasattr(self.transformer, 'positional_encoding'):
+            bev_pos = self.transformer.positional_encoding(bev_mask).to(dtype)
+        else:
+            # Fallback: Many 1.x implementations use 'bev_pos' or similar registered in the config
+            raise AttributeError("VADHead is missing 'positional_encoding'. Check your __init__ or config.")
             
         if only_bev:  # only use encoder to obtain BEV features, TODO: refine the workaround
             return self.transformer.get_bev_features(

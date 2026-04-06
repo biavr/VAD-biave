@@ -3,11 +3,11 @@ import torch
 from torch import nn as nn
 from torch.nn.functional import l1_loss, mse_loss, smooth_l1_loss
 
-from mmdet.models.builder import LOSSES
+from mmdet3d.registry import MODELS
 from mmdet.models import weighted_loss
 import mmcv
 import torch.nn.functional as F
-from mmdet.core.bbox.match_costs.builder import MATCH_COST
+from mmdet.models.task_modules import MATCH_COSTS
 import functools
 
 
@@ -30,7 +30,6 @@ def reduce_loss(loss, reduction):
     elif reduction_enum == 2:
         return loss.sum()
 
-@mmcv.jit(derivate=True, coderize=True)
 def custom_weight_dir_reduce_loss(loss, weight=None, reduction='mean', avg_factor=None):
     """Apply element-wise weight and reduce loss.
 
@@ -63,7 +62,6 @@ def custom_weight_dir_reduce_loss(loss, weight=None, reduction='mean', avg_facto
             raise ValueError('avg_factor can not be used with reduction="sum"')
     return loss
 
-@mmcv.jit(derivate=True, coderize=True)
 def custom_weight_reduce_loss(loss, weight=None, reduction='mean', avg_factor=None):
     """Apply element-wise weight and reduce loss.
 
@@ -187,7 +185,6 @@ def custom_weighted_dir_loss(loss_func):
 
     return wrapper
 
-@mmcv.jit(derivate=True, coderize=True)
 @custom_weighted_loss
 def ordered_pts_smooth_l1_loss(pred, target):
     """L1 loss.
@@ -207,7 +204,6 @@ def ordered_pts_smooth_l1_loss(pred, target):
     # import pdb;pdb.set_trace()
     return loss
 
-@mmcv.jit(derivate=True, coderize=True)
 @weighted_loss
 def pts_l1_loss(pred, target):
     """L1 loss.
@@ -225,7 +221,6 @@ def pts_l1_loss(pred, target):
     loss = torch.abs(pred - target)
     return loss
 
-@mmcv.jit(derivate=True, coderize=True)
 @custom_weighted_loss
 def ordered_pts_l1_loss(pred, target):
     """L1 loss.
@@ -244,7 +239,6 @@ def ordered_pts_l1_loss(pred, target):
     loss = torch.abs(pred - target)
     return loss
 
-@mmcv.jit(derivate=True, coderize=True)
 @custom_weighted_dir_loss
 def pts_dir_cos_loss(pred, target):
     """ Dir cosine similiarity loss
@@ -263,7 +257,7 @@ def pts_dir_cos_loss(pred, target):
     loss = loss.view(num_samples, num_dir)
     return loss
 
-@LOSSES.register_module()
+@MODELS.register_module()
 class OrderedPtsSmoothL1Loss(nn.Module):
     """L1 loss.
 
@@ -306,7 +300,7 @@ class OrderedPtsSmoothL1Loss(nn.Module):
         return loss_bbox
 
 
-@LOSSES.register_module()
+@MODELS.register_module()
 class PtsDirCosLoss(nn.Module):
     """L1 loss.
 
@@ -350,7 +344,7 @@ class PtsDirCosLoss(nn.Module):
 
 
 
-@LOSSES.register_module()
+@MODELS.register_module()
 class PtsL1Loss(nn.Module):
     """L1 loss.
 
@@ -392,7 +386,7 @@ class PtsL1Loss(nn.Module):
             pred, target, weight, reduction=reduction, avg_factor=avg_factor)
         return loss_bbox
 
-@LOSSES.register_module()
+@MODELS.register_module()
 class OrderedPtsL1Loss(nn.Module):
     """L1 loss.
 
@@ -437,7 +431,7 @@ class OrderedPtsL1Loss(nn.Module):
 
 
 
-@MATCH_COST.register_module()
+@MATCH_COSTS.register_module()
 class OrderedPtsSmoothL1Cost(object):
     """OrderedPtsL1Cost.
      Args:
@@ -468,7 +462,7 @@ class OrderedPtsSmoothL1Cost(object):
         # bbox_cost = torch.cdist(bbox_pred, gt_bboxes, p=1)
         return bbox_cost * self.weight
 
-@MATCH_COST.register_module()
+@MATCH_COSTS.register_module()
 class PtsL1Cost(object):
     """OrderedPtsL1Cost.
      Args:
@@ -497,7 +491,7 @@ class PtsL1Cost(object):
         bbox_cost = torch.cdist(bbox_pred, gt_bboxes, p=1)
         return bbox_cost * self.weight
 
-@MATCH_COST.register_module()
+@MATCH_COSTS.register_module()
 class OrderedPtsL1Cost(object):
     """OrderedPtsL1Cost.
      Args:
@@ -526,7 +520,7 @@ class OrderedPtsL1Cost(object):
         bbox_cost = torch.cdist(bbox_pred, gt_bboxes, p=1)
         return bbox_cost * self.weight
 
-@MATCH_COST.register_module()
+@MATCH_COSTS.register_module()
 class MyChamferDistanceCost:
     def __init__(self, loss_src_weight=1., loss_dst_weight=1.):
         # assert mode in ['smooth_l1', 'l1', 'l2']
@@ -561,7 +555,6 @@ class MyChamferDistanceCost:
         loss = loss_src*self.loss_src_weight + loss_dst * self.loss_dst_weight
         return loss
 
-@mmcv.jit(derivate=True, coderize=True)
 def chamfer_distance(src,
                      dst,
                      src_weight=1.0,
@@ -639,7 +632,7 @@ def chamfer_distance(src,
     return loss_src, loss_dst, indices1, indices2
 
 
-@LOSSES.register_module()
+@MODELS.register_module()
 class MyChamferDistance(nn.Module):
     """Calculate Chamfer Distance of two sets.
 

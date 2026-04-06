@@ -2,7 +2,20 @@ import torch
 import torch.nn as nn
 import numpy as np
 from PIL import Image
-from mmcv.runner import force_fp32, auto_fp16
+
+import functools
+
+def manual_auto_fp16(apply_to=None, out_fp32=False):
+    """Replacement for the missing auto_fp16 decorator."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+auto_fp16 = manual_auto_fp16
+
 
 class Grid(object):
     def __init__(self, use_h, use_w, rotate = 1, offset=False, ratio = 0.5, mode=0, prob = 1.):

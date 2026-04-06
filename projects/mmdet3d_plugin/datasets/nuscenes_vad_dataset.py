@@ -5,26 +5,30 @@ import tempfile
 from typing import Dict, List
 
 import numpy as np
-from mmdet.datasets import DATASETS
+from mmengine.registry import DATASETS
+from mmengine.fileio import load
 from mmdet3d.datasets import NuScenesDataset
 import pyquaternion
 import mmcv
 from os import path as osp
-from mmdet.datasets import DATASETS
+
 import torch
 import numpy as np
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
+
+from mmdet3d.datasets.transforms import Pack3DDetInputs
 from .vad_custom_nuscenes_eval import NuScenesEval_custom
 from nuscenes.eval.common.utils import center_distance
 from projects.mmdet3d_plugin.models.utils.visual import save_tensor
-from mmcv.parallel import DataContainer as DC
+from mmengine.dataset import Compose
+from mmengine.structures import InstanceData
 import random
-from mmdet3d.core import LiDARInstance3DBoxes
+from mmdet3d.structures import LiDARInstance3DBoxes
 from nuscenes.utils.data_classes import Box as NuScenesBox
 from projects.mmdet3d_plugin.core.bbox.structures.nuscenes_box import CustomNuscenesBox
 from shapely import affinity, ops
 from shapely.geometry import LineString, box, MultiPolygon, MultiLineString
-from mmdet.datasets.pipelines import to_tensor
+from mmcv.transforms import to_tensor
 from nuscenes.map_expansion.map_api import NuScenesMap, NuScenesMapExplorer
 from nuscenes.eval.detection.constants import DETECTION_NAMES
 
@@ -696,6 +700,50 @@ class VectorizedLocalMap(object):
         return self._one_type_line_geom_to_instances(results)
 
 
+    def parse_data_info(self, info: dict) -> dict:
+        """Handshake between VAD pkl and MMEngine statistics collector."""
+        # 1. Standardize the data info using the base NuScenesDataset logic
+        data_info = super().parse_data_info(info)
+        print(f">>> Dataset Debug: Original data_info keys: {list(data_info.keys())}")
+
+        data_info['sample_idx'] = info.get('token', info.get('sample_idx'))
+
+        # 3. BUILD THE INSTANCES LIST (This is what the counter scans)
+        if 'gt_names' in info:
+            instances = []
+            for i, name in enumerate(info['gt_names']):
+                clean_name = self.NAME_MAPPING.get(name, name)
+                
+                if clean_name in self.METAINFO['classes']:
+                    label_idx = self.METAINFO['classes'].index(clean_name)
+                    instances.append({
+                        # 'bbox_label' is the specific key MMEngine's counter looks for
+                        'bbox_label': int(label_idx),
+                        'ignore_flag': 0
+                    })
+            data_info['instances'] = instances
+        
+        # # 2. If 'instances' is empty (legacy pkl), build it from gt_names/gt_boxes
+        # if (not data_info.get('instances')) and 'gt_names' in info:
+        #     instances = []
+        #     for i, name in enumerate(info['gt_names']):
+        #         # Clean the name using our mapping
+        #         clean_name = self.NAME_MAPPING.get(name, name)
+                
+        #         if clean_name in self.metainfo['classes']:
+        #             instances.append({
+        #                 'bbox_label': self.metainfo['classes'].index(clean_name),
+        #                 'bbox_3d': info['gt_boxes'][i],
+        #                 'ignore_flag': 0
+        #             })
+        #     data_info['instances'] = instances
+        #     # Debug: Print the first few samples to see the counts increasing
+        #     if random.random() < 0.01: # Print ~1% of samples
+        #         print(f">>> Dataset Debug: Parsed {len(instances)} instances for sample {info.get('token', 'N/A')}")
+            
+        return data_info
+
+
     def poly_geoms_to_instances(self, polygon_geom):
         roads = polygon_geom[0][1]
         lanes = polygon_geom[1][1]
@@ -999,6 +1047,13 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         *args,
         **kwargs
     ):
+        print("\n!!! VAD DATASET INITIALIZING !!!\n") # Add this!
+        # print(">>> Initializing VADCustomNuScenesDataset with custom_eval_version: ", custom_eval_version)
+        if 'metainfo' not in kwargs:
+            print(">>> No metainfo provided, using default METAINFO.")
+            kwargs['metainfo'] = self.METAINFO
+        # print(">>> Dataset METAINFO: ", kwargs['metainfo'])
+            
         super().__init__(*args, **kwargs)
         self.queue_length = queue_length
         self.overlap_test = overlap_test
@@ -1033,6 +1088,12 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                             fixed_ptsnum_per_line=map_fixed_ptsnum_per_line,
                             padding_value=self.padding_value)
         self.is_vis_on_test = True
+        self.data_infos = self.data_list
+        # print(">>> Registered Classes in MMEngine:", self.metainfo.get('classes'))
+        self.packer = Pack3DDetInputs(
+            keys=['img', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_attr_labels'],
+            meta_keys=['sample_idx', 'lidar2img', 'can_bus', 'timestamp', 'img_metas']
+        )
 
     @classmethod
     def get_map_classes(cls, map_classes=None):
@@ -1060,6 +1121,42 @@ class VADCustomNuScenesDataset(NuScenesDataset):
             raise ValueError(f'Unsupported type {type(map_classes)} of map classes.')
 
         return class_names
+
+    # @property
+    # def data_infos(self):
+    #     # MMEngine 1.x / 2.0 uses 'data_list' internally
+    #     if hasattr(self, 'data_list') and len(self.data_list) > 0:
+    #         return self.data_list
+    #     return []
+
+    # @data_infos.setter
+    # def data_infos(self, value):
+    #     self.data_list = value
+
+    @property
+    def CLASSES(self):
+        """Bridge legacy CLASSES attribute to MMEngine metainfo."""
+        return self.metainfo.get('classes', None)
+    
+    METAINFO = {
+        'classes': [
+            'car', 'truck', 'construction_vehicle', 'bus', 'trailer',
+            'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+        ]
+    }
+    NAME_MAPPING = {
+        'movable_object.trafficcone': 'traffic_cone',
+        'movable_object.pushable_pullable': 'car', # or skip, but car is safer for training
+        'vehicle.car': 'car',
+        'vehicle.truck': 'truck',
+        'vehicle.bus': 'bus',
+        'vehicle.construction_vehicle': 'construction_vehicle',
+        'vehicle.bicycle': 'bicycle',
+        'human.pedestrian.adult': 'pedestrian',
+        'human.pedestrian.child': 'pedestrian',
+        'human.pedestrian.construction_worker': 'pedestrian',
+        'human.pedestrian.police_officer': 'pedestrian',
+    }
 
     def vectormap_pipeline(self, example, input_dict):
         '''
@@ -1109,10 +1206,88 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                 # but we preserve it for test
                 gt_vecs_pts_loc = gt_vecs_pts_loc
 
-        example['map_gt_labels_3d'] = DC(gt_vecs_label, cpu_only=False)
-        example['map_gt_bboxes_3d'] = DC(gt_vecs_pts_loc, cpu_only=True)
+        # example['map_gt_labels_3d'] = DC(gt_vecs_label, cpu_only=False)
+        # example['map_gt_bboxes_3d'] = DC(gt_vecs_pts_loc, cpu_only=True)
+        example['map_gt_labels_3d'] = gt_vecs_label
+        example['map_gt_bboxes_3d'] = gt_vecs_pts_loc
 
         return example
+
+    def parse_data_info(self, info: dict) -> dict:
+        """Handshake between VAD pkl and MMEngine statistics collector."""
+        # 1. Standardize the data info using the base NuScenesDataset logic
+        data_info = super().parse_data_info(info)
+        # print(f">>> Dataset Debug: Original data_info keys: {list(data_info.keys())}")
+
+        data_info['sample_idx'] = info.get('token', info.get('sample_idx'))
+
+        # 3. BUILD THE INSTANCES LIST (This is what the counter scans)
+        if 'gt_names' in info:
+            instances = []
+            for i, name in enumerate(info['gt_names']):
+                clean_name = self.NAME_MAPPING.get(name, name)
+                
+                if clean_name in self.METAINFO['classes']:
+                    label_idx = self.METAINFO['classes'].index(clean_name)
+                    instances.append({
+                        # 'bbox_label' is the specific key MMEngine's counter looks for
+                        'bbox_label': int(label_idx),
+                        'ignore_flag': 0
+                    })
+            data_info['instances'] = instances
+        
+        return data_info
+
+    def load_data_list(self):
+        # print("\n" + "="*50)
+        # print("CRITICAL: VADCustomNuScenesDataset.load_data_list IS RUNNING")
+        # print("="*50 + "\n")
+        """Bridge old VAD list-style pkl to new MMEngine dict-style."""
+        # 1. Load the pkl file
+        annotations = load(self.ann_file)
+        
+        # 2. Extract the raw data list
+        if isinstance(annotations, dict) and 'infos' in annotations:
+            raw_data_list = annotations['infos']
+        elif isinstance(annotations, list):
+            raw_data_list = annotations
+        else:
+            raw_data_list = annotations.get('data_list', [])
+
+        # print(f">>> Dataset: Processing {len(raw_data_list)} samples for MMEngine...")
+
+        # 3. MANUALLY BUILD INSTANCES FOR THE COUNTER
+        # MMEngine statistics collector looks for 'instances' in each sample
+        for info in raw_data_list:
+            if 'gt_names' in info: # Removed 'and instances not in info' to be safe
+                instances = []
+                for i, name in enumerate(info['gt_names']):
+                    clean_name = self.NAME_MAPPING.get(name, name)
+                    if clean_name in self.METAINFO['classes']:
+                        label_idx = self.METAINFO['classes'].index(clean_name)
+                        instances.append({
+                            # MMEngine's counter often looks for 'bbox_label' or 'label'
+                            'bbox_label': int(label_idx),
+                            # Adding the name string helps the internal remapper
+                            'category': clean_name, 
+                            'bbox_3d': info['gt_boxes'][i],
+                            'ignore_flag': 0
+                        })
+                        self.num_ins_per_cat[label_idx] += 1
+                info['instances'] = instances
+
+        # 4. Final verification print
+        if len(raw_data_list) > 0:
+            sample_idx = random.randint(0, len(raw_data_list)-1)
+            # print(f">>> Debug: Sample {sample_idx} has {len(raw_data_list[sample_idx].get('instances', []))} counted instances.")
+        self._fully_initialized = True
+        # if hasattr(self, 'label_mapping'):
+        #     print(f">>> Internal Label Mapping: {self.label_mapping}")
+        # print(f">>> Final Verification: First sample keys: {raw_data_list[0].keys()}")
+        # if 'instances' in raw_data_list[0]:
+        #     print(f">>> First sample instance labels: {[ins['bbox_label'] for ins in raw_data_list[0]['instances']]}")
+        return raw_data_list
+
 
     def prepare_train_data(self, index):
         """
@@ -1122,7 +1297,9 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict: Training data dict of the corresponding index.
         """
+        # print(">>> Preparing training data for index: ", index)
         data_queue = []
+        ann_info = self.get_ann_info(index)
 
         # temporal aug
         prev_indexs_list = list(range(index-self.queue_length, index))
@@ -1132,24 +1309,26 @@ class VADCustomNuScenesDataset(NuScenesDataset):
 
         input_dict = self.get_data_info(index)
         if input_dict is None:
+            print(f">>> Warning: No data info found for index {index}. Skipping this sample.")
             return None
         frame_idx = input_dict['frame_idx']
         scene_token = input_dict['scene_token']
-        self.pre_pipeline(input_dict)
+        # self.pre_pipeline(input_dict)
         example = self.pipeline(input_dict)
         example = self.vectormap_pipeline(example,input_dict)
         if self.filter_empty_gt and \
-                ((example is None or ~(example['gt_labels_3d']._data != -1).any()) or \
-                    (example is None or ~(example['map_gt_labels_3d']._data != -1).any())):
+                ((example is None or ~(example['gt_labels_3d'] != -1).any()) or \
+                    (example is None or ~(example['map_gt_labels_3d'] != -1).any())):
             return None
         data_queue.insert(0, example)
         for i in prev_indexs_list:
             i = max(0, i)
             input_dict = self.get_data_info(i)
             if input_dict is None:
+                # print(f">>> Warning: No data info found for index {i}. Skipping this sample.")
                 return None
             if input_dict['frame_idx'] < frame_idx and input_dict['scene_token'] == scene_token:
-                self.pre_pipeline(input_dict)
+                # self.pre_pipeline(input_dict)
                 example = self.pipeline(input_dict)
                 example = self.vectormap_pipeline(example,input_dict)
                 if self.filter_empty_gt and \
@@ -1158,7 +1337,58 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                     return None
                 frame_idx = input_dict['frame_idx']
             data_queue.insert(0, copy.deepcopy(example))
-        return self.union2one(data_queue)
+        merged_data = self.union2one(data_queue)
+        merged_data.update(ann_info)
+        # 1. Take the 5D image out so the packer doesn't try to permute it
+        combined_img = merged_data.pop('img') 
+        # Collect all planning/ego attributes
+        # planning_data = {
+        #     'ego_his_trajs': merged_data.pop('ego_his_trajs', None),
+        #     'ego_fut_trajs': merged_data.pop('ego_fut_trajs', None),
+        #     'ego_fut_masks': merged_data.pop('ego_fut_masks', None),
+        #     'ego_fut_cmd': merged_data.pop('ego_fut_cmd', None),
+        #     'ego_lcf_feat': merged_data.pop('ego_lcf_feat', None),
+        #     'gt_attr_labels': merged_data.pop('gt_attr_labels', None)
+        # }
+        planning_keys = [
+            'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 
+            'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'
+        ]
+        planning_data = {k: merged_data.pop(k, None) for k in planning_keys}
+
+        attr_labels = merged_data.pop('gt_attr_labels', None) 
+        if attr_labels is None:
+            attr_labels = merged_data.pop('vad_attr_labels', None)
+        # 2. Run the packer on everything else (boxes, labels, metas)
+        packed_results = self.packer(merged_data)
+        for k, v in planning_data.items():
+            if v is not None:
+                packed_results['data_samples'].set_metainfo({k: v})
+        # 3. Manually put the 5D image into the 1.x 'inputs' field
+        # PyTorch expects (C, H, W), VAD usually wants (N, Cam, C, H, W)
+        if not torch.is_tensor(combined_img):
+            combined_img = torch.from_numpy(combined_img)
+            
+        if attr_labels is not None:
+            packed_results['data_samples'].set_metainfo({'gt_attr_labels': attr_labels})
+
+        if not hasattr(packed_results['data_samples'], 'gt_instances_3d'):
+            from mmengine.structures import InstanceData
+            gt_instances = InstanceData()
+            gt_instances.bboxes_3d = ann_info['gt_bboxes_3d']
+            gt_instances.labels_3d = torch.from_numpy(ann_info['gt_labels_3d'])
+            packed_results['data_samples'].gt_instances_3d = gt_instances
+
+        for key, value in planning_data.items():
+            if value is not None:
+                packed_results['data_samples'].set_metainfo({key: value})
+            else:
+                # Provide a zero-tensor fallback if data is missing to avoid NoneType errors
+                # print(f">>> WARNING: {key} is missing for this sample!")
+                packed_results['data_samples'].set_metainfo({'img_metas': merged_data['img_metas']})
+        packed_results['inputs'] = dict(img=combined_img)
+       
+        return packed_results
 
     def prepare_test_data(self, index):
         """Prepare data for testing.
@@ -1170,7 +1400,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
             dict: Testing data dict of the corresponding index.
         """
         input_dict = self.get_data_info(index)
-        self.pre_pipeline(input_dict)
+        # self.pre_pipeline(input_dict)
         example = self.pipeline(input_dict)
         if self.is_vis_on_test:
             example = self.vectormap_pipeline(example, input_dict)
@@ -1180,16 +1410,78 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         """
         convert sample queue into one single sample.
         """
-        imgs_list = [each['img'].data for each in queue]
+        # imgs_list = [each['img'].data for each in queue]
+        imgs_list = []
         metas_map = {}
         prev_pos = None
         prev_angle = None
+        # print(f">>> Debug: Processing a queue of {len(queue)} frames for temporal fusion.")
+        # print(queue[0].keys())
+        def get_ref_matrix(frame):
+            # Check top level
+            if 'lidar2img' in frame: return frame['lidar2img']
+            # Check nested img_metas
+            metas = frame.get('img_metas', {})
+            if isinstance(metas, dict) and 'lidar2img' in metas:
+                return metas['lidar2img']
+            # Check MMEngine data_samples if packed
+            if 'data_samples' in frame and hasattr(frame['data_samples'], 'metainfo'):
+                return frame['data_samples'].metainfo.get('lidar2img')
+            return None
+        
+        # Get the anchor matrix from the current frame (the last one)
+        anchor_lidar2img = get_ref_matrix(queue[-1])
+        anchor_frame = queue[-1]
+        fallback_shape = anchor_frame.get('img_shape', [[480, 800]])
+        fallback_lidar2img = anchor_frame.get('lidar2img')
+
+        current_frame = queue[-1]
+        fallback_lidar2img = current_frame.get('lidar2img', None)
+        if fallback_lidar2img is None and 'img_metas' in current_frame:
+            fallback_lidar2img = current_frame['img_metas'].get('lidar2img')
         for i, each in enumerate(queue):
-            metas_map[i] = each['img_metas'].data
+            img = each.get('img', None)
+            if img is None:
+                img = torch.zeros((6, 3, 480, 800))
+            if isinstance(img, list):
+                # Ensure each camera element is a torch.Tensor
+                img = [torch.from_numpy(c) if isinstance(c, np.ndarray) else c for c in img]
+                img = torch.stack(img) # Results in [6, C, H, W]
+            elif isinstance(img, np.ndarray):
+                img = torch.from_numpy(img)
+
+            if hasattr(img, 'data'): img = img.data # Handle legacy DC
+            imgs_list.append(img)
+            # Metadata in 1.x is the dict itself, or each['img_metas'] in legacy
+            metas = copy.deepcopy(each.get('img_metas', each))
+            curr_lidar2img = metas.get('lidar2img', anchor_lidar2img)
+            if 'lidar2img' not in metas or metas['lidar2img'] is None:
+                metas['lidar2img'] = np.array(fallback_lidar2img, dtype=np.float32)
+            if curr_lidar2img is not None:
+                curr_lidar2img = np.array(curr_lidar2img, dtype=np.float32)
+                # If it accidentally flattened to (96,) or (16,), reshape it back
+                if curr_lidar2img.size == 96: # 6 cameras * 16 elements
+                    curr_lidar2img = curr_lidar2img.reshape(6, 4, 4)
+                elif curr_lidar2img.size == 16: # Single camera fallback
+                    curr_lidar2img = curr_lidar2img.reshape(1, 4, 4).repeat(6, axis=0)
+                
+                metas['lidar2img'] = curr_lidar2img
+            if 'img_shape' not in metas:
+                metas['img_shape'] = fallback_shape
+            
+            if 'can_bus' not in metas:
+                # print(f">>> WARNING: 'can_bus' missing in metadata for sample {i}. Using zeros as fallback.")
+                # Fallback to zeros if can_bus is missing in a history frame
+                metas['can_bus'] = np.zeros(18, dtype=np.float32)
+            if hasattr(metas, 'data'): metas = metas.data
+            
+            metas_map[i] = metas
+
             if i == 0:
                 metas_map[i]['prev_bev'] = False
-                prev_pos = copy.deepcopy(metas_map[i]['can_bus'][:3])
-                prev_angle = copy.deepcopy(metas_map[i]['can_bus'][-1])
+                can_bus = metas_map[i].get('can_bus', np.zeros(18))
+                prev_pos = copy.deepcopy(can_bus[:3])
+                prev_angle = copy.deepcopy(float(can_bus[-1]))
                 metas_map[i]['can_bus'][:3] = 0
                 metas_map[i]['can_bus'][-1] = 0
             else:
@@ -1201,11 +1493,18 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                 prev_pos = copy.deepcopy(tmp_pos)
                 prev_angle = copy.deepcopy(tmp_angle)
 
-        queue[-1]['img'] = DC(torch.stack(imgs_list),
-                              cpu_only=False, stack=True)
-        queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
-        queue = queue[-1]
-        return queue
+        # queue[-1]['img'] = DC(torch.stack(imgs_list),
+                            #   cpu_only=False, stack=True)
+        # queue[-1]['img_metas'] = DC(metas_map, cpu_only=True)
+        # queue[-1]['img'] = torch.stack(imgs_list)
+        # queue[-1]['img_metas'] = metas_map
+        # queue = queue[-1]
+        # return queue
+
+        res = queue[-1]
+        res['img'] = torch.stack(imgs_list)
+        res['img_metas'] = metas_map # VAD model expects this map
+        return res
 
     def get_ann_info(self, index):
         """Get annotation info according to the given index.
@@ -1221,7 +1520,9 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                 - gt_labels_3d (np.ndarray): Labels of ground truths.
                 - gt_names (list[str]): Class names of ground truths.
         """
-        info = self.data_infos[index]
+        # print(">>> Getting annotation info for index: ", index)
+        # info = self.data_infos[index]
+        info = self.data_list[index]
         # filter out bbox containing no points
         if self.use_valid_flag:
             mask = info['valid_flag']
@@ -1264,6 +1565,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
             gt_names=gt_names_3d,
+            vad_attr_labels=attr_labels,
             attr_labels=attr_labels)
 
         return anns_results
@@ -1287,7 +1589,20 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                     from lidar to different cameras.
                 - ann_info (dict): Annotation info.
         """
-        info = self.data_infos[index]
+        
+        # Ensure the list is actually populated
+        if not hasattr(self, 'data_list') or len(self.data_list) == 0:
+             # This safety check helps if serialization is still interfering
+             self.full_init()
+        
+        # Double check the index bounds before access
+        if index >= len(self.data_list):
+            print(f">>> ERROR: Accessing index {index} but data_list size is {len(self.data_list)}")
+            # Fallback to index 0 to prevent worker crash during training
+            index = 0
+        # print(">>> Getting data info for index: ", index)
+        # info = self.data_infos[index]
+        info = self.data_list[index]
         # standard protocal modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info['token'],
@@ -1311,6 +1626,9 @@ class VADCustomNuScenesDataset(NuScenesDataset):
             ego_fut_cmd=info['gt_ego_fut_cmd'],
             ego_lcf_feat=info['gt_ego_lcf_feat']
         )
+        input_dict['can_bus'] = info['can_bus']
+        input_dict['ego_fut_trajs'] = info['gt_ego_fut_trajs']
+        input_dict['ego_fut_masks'] = info['gt_ego_fut_masks']
         # lidar to ego transform
         lidar2ego = np.eye(4).astype(np.float32)
         lidar2ego[:3, :3] = Quaternion(info["lidar2ego_rotation"]).rotation_matrix
@@ -1324,8 +1642,11 @@ class VADCustomNuScenesDataset(NuScenesDataset):
             cam_intrinsics = []
             input_dict["camera2ego"] = []
             input_dict["camera_intrinsics"] = []
+            images = dict() # Create the 'images' dictionary
             for cam_type, cam_info in info['cams'].items():
-                image_paths.append(cam_info['data_path'])
+                raw_path = cam_info['data_path']
+                fixed_path = os.path.join(self.data_root, raw_path)                
+                image_paths.append(fixed_path)
                 # obtain lidar to image transformation matrix
                 lidar2cam_r = np.linalg.inv(cam_info['sensor2lidar_rotation'])
                 lidar2cam_t = cam_info[
@@ -1354,6 +1675,32 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                 camera_intrinsics[:3, :3] = cam_info["cam_intrinsic"]
                 input_dict["camera_intrinsics"].append(camera_intrinsics)
 
+                ############
+                #  UPDATE  #
+                ############
+                cam_dict = dict()
+                # cam_dict['img_path'] = cam_info['data_path']
+                cam_dict['img_path'] = fixed_path
+                # 1. Extrinsic: Lidar to Camera
+                lidar2cam_r = np.linalg.inv(cam_info['sensor2lidar_rotation'])
+                lidar2cam_t = cam_info['sensor2lidar_translation'] @ lidar2cam_r.T
+                lidar2cam_rt = np.eye(4)
+                lidar2cam_rt[:3, :3] = lidar2cam_r.T
+                lidar2cam_rt[3, :3] = -lidar2cam_t
+                
+                # 2. Intrinsic: Camera to Image (The key MMDet3D 1.x wants)
+                intrinsic = cam_info['cam_intrinsic']
+                viewpad = np.eye(4)
+                viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
+                
+                # --- UPDATE THESE THREE KEYS ---
+                cam_dict['cam2img'] = viewpad.astype(np.float32) # Change from cam_intrinsic
+                cam_dict['lidar2cam'] = lidar2cam_rt.T.astype(np.float32)
+                cam_dict['lidar2img'] = (viewpad @ lidar2cam_rt.T).astype(np.float32)
+                # -------------------------------
+                
+                images[cam_type] = cam_dict
+
             input_dict.update(
                 dict(
                     img_filename=image_paths,
@@ -1361,6 +1708,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                     cam_intrinsic=cam_intrinsics,
                     lidar2cam=lidar2cam_rts,
                 ))
+            input_dict['images'] = images
 
         # NOTE: now we load gt in test_mode for evaluating
         # if not self.test_mode:
@@ -1374,7 +1722,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         translation = input_dict['ego2global_translation']
         can_bus = input_dict['can_bus']
         can_bus[:3] = translation
-        can_bus[3:7] = rotation
+        can_bus[3:7] = rotation.q
         patch_angle = quaternion_yaw(rotation) / np.pi * 180
         if patch_angle < 0:
             patch_angle += 360
@@ -1389,6 +1737,24 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         ego2global[:3, 3] = input_dict['ego2global_translation']
         lidar2global = ego2global @ lidar2ego
         input_dict['lidar2global'] = lidar2global
+        input_dict['attr_labels'] = annos['attr_labels']
+
+        # --- ADD THIS BLOCK START ---
+        # MMEngine's statistics collector scans the 'instances' key.
+        # We must map our processed gt_names into this list for the counter to work.
+        if 'gt_names' in annos:
+            instances = []
+            for i, name in enumerate(annos['gt_names']):
+                # Standardize name using your class's NAME_MAPPING
+                clean_name = self.NAME_MAPPING.get(name, name)
+                
+                if clean_name in self.metainfo['classes']:
+                    instances.append({
+                        'bbox_label': self.metainfo['classes'].index(clean_name),
+                        'ignore_flag': 0
+                    })
+            input_dict['instances'] = instances
+        # --- ADD THIS BLOCK END ---
 
         return input_dict
 
@@ -1409,7 +1775,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
 
     def _format_gt(self):
         gt_annos = []
-        print('Start to convert gt map format...')
+        # print('Start to convert gt map format...')
         # assert self.map_ann_file is not None
         if (not os.path.exists(self.map_ann_file)) :
             dataset_length = len(self)
@@ -1932,3 +2298,4 @@ def output_to_vecs(detection):
         )
         vec_list.append(vec)
     return vec_list
+

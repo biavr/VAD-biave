@@ -7,6 +7,8 @@ from collections import OrderedDict
 from typing import List, Tuple, Union
 
 import mmcv
+from mmengine import dump, load
+from mmengine.utils import is_filepath, track_iter_progress, check_file_exist
 import numpy as np
 from pyquaternion import Quaternion
 from nuscenes.nuscenes import NuScenes
@@ -14,7 +16,7 @@ from nuscenes.utils.data_classes import Box
 from shapely.geometry import MultiPoint, box
 from mmdet3d.datasets import NuScenesDataset
 from nuscenes.utils.geometry_utils import view_points
-from mmdet3d.core.bbox.box_np_ops import points_cam2img
+from mmdet3d.structures import points_cam2img
 from nuscenes.utils.geometry_utils import transform_matrix
 
 
@@ -28,6 +30,23 @@ nus_attributes = ('cycle.with_rider', 'cycle.without_rider',
                   'vehicle.parked', 'vehicle.stopped', 'None')
 
 ego_width, ego_length = 1.85, 4.084
+
+NUSC_NAME_MAPPING = {
+    'movable_object.barrier': 'barrier',
+    'movable_object.trafficcone': 'traffic_cone',
+    'vehicle.bicycle': 'bicycle',
+    'vehicle.bus.bendy': 'bus',
+    'vehicle.bus.rigid': 'bus',
+    'vehicle.car': 'car',
+    'vehicle.construction': 'construction_vehicle',
+    'vehicle.motorcycle': 'motorcycle',
+    'vehicle.trailer': 'trailer',
+    'vehicle.truck': 'truck',
+    'human.pedestrian.adult': 'pedestrian',
+    'human.pedestrian.child': 'pedestrian',
+    'human.pedestrian.construction_worker': 'pedestrian',
+    'human.pedestrian.police_officer': 'pedestrian',
+}
 
 def quart_to_rpy(qua):
     x, y, z, w = qua
@@ -112,18 +131,18 @@ def create_nuscenes_infos(root_path,
         data = dict(infos=train_nusc_infos, metadata=metadata)
         info_path = osp.join(out_path,
                              '{}_infos_temporal_test.pkl'.format(info_prefix))
-        mmcv.dump(data, info_path)
+        dump(data, info_path)
     else:
         print('train sample: {}, val sample: {}'.format(
             len(train_nusc_infos), len(val_nusc_infos)))
         data = dict(infos=train_nusc_infos, metadata=metadata)
         info_path = osp.join(out_path,
                              '{}_infos_temporal_train.pkl'.format(info_prefix))
-        mmcv.dump(data, info_path)
+        dump(data, info_path)
         data['infos'] = val_nusc_infos
         info_val_path = osp.join(out_path,
                                  '{}_infos_temporal_val.pkl'.format(info_prefix))
-        mmcv.dump(data, info_val_path)
+        dump(data, info_val_path)
 
 
 def get_available_scenes(nusc):
@@ -155,7 +174,7 @@ def get_available_scenes(nusc):
                 # path from lyftdataset is absolute path
                 lidar_path = lidar_path.split(f'{os.getcwd()}/')[-1]
                 # relative path
-            if not mmcv.is_filepath(lidar_path):
+            if not is_filepath(lidar_path):
                 scene_not_exist = True
                 break
             else:
@@ -221,7 +240,7 @@ def _fill_trainval_infos(nusc,
     for idx, dic in enumerate(nusc.category):
         cat2idx[dic['name']] = idx
 
-    for sample in mmcv.track_iter_progress(nusc.sample):
+    for sample in track_iter_progress(nusc.sample):
         map_location = nusc.get('log', nusc.get('scene', sample['scene_token'])['log_token'])['location']
         lidar_token = sample['data']['LIDAR_TOP']
         sd_rec = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
@@ -243,7 +262,7 @@ def _fill_trainval_infos(nusc,
 
         lidar_path, boxes, _ = nusc.get_sample_data(lidar_token)
 
-        mmcv.check_file_exist(lidar_path)
+        check_file_exist(lidar_path)
         can_bus = _get_can_bus_info(nusc, nusc_can_bus, sample)
         fut_valid_flag = True
         test_sample = copy.deepcopy(sample)
@@ -337,9 +356,10 @@ def _fill_trainval_infos(nusc,
                 velocity[i] = velo[:2]
 
             names = [b.name for b in boxes]
+            # print("HELLO NAMES CONVERTER", set(names))
             for i in range(len(names)):
-                if names[i] in NuScenesDataset.NameMapping:
-                    names[i] = NuScenesDataset.NameMapping[names[i]]
+                if names[i] in NUSC_NAME_MAPPING:
+                    names[i] = NUSC_NAME_MAPPING[names[i]]
             names = np.array(names)
             # we need to convert rot to SECOND format.
             gt_boxes = np.concatenate([locs, dims, -rots - np.pi / 2], axis=1)
@@ -639,7 +659,7 @@ def export_2d_annotation(root_path, info_path, version, mono3d=False):
         'CAM_BACK_LEFT',
         'CAM_BACK_RIGHT',
     ]
-    nusc_infos = mmcv.load(info_path)['infos']
+    nusc_infos = load(info_path)['infos']
     nusc = NuScenes(version=version, dataroot=root_path, verbose=True)
     # info_2d_list = []
     cat2Ids = [
@@ -648,7 +668,7 @@ def export_2d_annotation(root_path, info_path, version, mono3d=False):
     ]
     coco_ann_id = 0
     coco_2d_dict = dict(annotations=[], images=[], categories=cat2Ids)
-    for info in mmcv.track_iter_progress(nusc_infos):
+    for info in track_iter_progress(nusc_infos):
         for cam in camera_types:
             cam_info = info['cams'][cam]
             coco_infos = get_2d_boxes(
@@ -682,7 +702,7 @@ def export_2d_annotation(root_path, info_path, version, mono3d=False):
         json_prefix = f'{info_path[:-4]}_mono3d'
     else:
         json_prefix = f'{info_path[:-4]}'
-    mmcv.dump(coco_2d_dict, f'{json_prefix}.coco.json')
+    dump(coco_2d_dict, f'{json_prefix}.coco.json')
 
 
 def get_2d_boxes(nusc,
@@ -974,7 +994,9 @@ parser.add_argument(
 args = parser.parse_args()
 
 if __name__ == '__main__':
+    print(f'1. preparing {args.dataset} dataset with version {args.version}')
     if args.dataset == 'nuscenes' and args.version != 'v1.0-mini':
+        print("version != v1.0-mini, preparing trainval and test set separately")
         train_version = f'{args.version}-trainval'
         nuscenes_data_prep(
             root_path=args.root_path,
@@ -995,6 +1017,7 @@ if __name__ == '__main__':
             max_sweeps=args.max_sweeps)
     elif args.dataset == 'nuscenes' and args.version == 'v1.0-mini':
         train_version = f'{args.version}'
+        print(f'2. preparing nuScenes mini dataset with version {train_version}')
         nuscenes_data_prep(
             root_path=args.root_path,
             can_bus_root_path=args.canbus,

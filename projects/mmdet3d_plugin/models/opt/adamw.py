@@ -5,7 +5,7 @@ except:
 
 import torch
 from torch.optim.optimizer import Optimizer
-from mmcv.runner.optimizer.builder import OPTIMIZERS
+from mmengine.registry import OPTIMIZERS
 
 @OPTIMIZERS.register_module()
 class AdamW2(Optimizer):

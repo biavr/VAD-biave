@@ -1,6 +1,7 @@
-from mmcv.runner.hooks.hook import HOOKS, Hook
+from mmengine.hooks import Hook
+from mmdet3d.registry import HOOKS
 from projects.mmdet3d_plugin.models.utils import run_time
-from mmcv.parallel import is_module_wrapper
+from mmengine.model import is_model_wrapper
 
 
 @HOOKS.register_module()

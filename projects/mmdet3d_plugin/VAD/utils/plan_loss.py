@@ -3,10 +3,10 @@ import mmcv
 import torch
 from torch import nn as nn
 from mmdet.models import weighted_loss
-from mmdet.models.builder import LOSSES
+from mmdet3d.registry import MODELS
 
 
-@LOSSES.register_module()
+@MODELS.register_module()
 class PlanMapBoundLoss(nn.Module):
     """Planning constraint to push ego vehicle away from the lane boundary.
 
@@ -85,7 +85,6 @@ class PlanMapBoundLoss(nn.Module):
         return loss_bbox
 
 
-@mmcv.jit(derivate=True, coderize=True)
 @weighted_loss
 def plan_map_bound_loss(pred, target, dis_thresh=1.0):
     """Planning map bound constraint (L1 distance).
@@ -176,7 +175,7 @@ def segments_intersect(line1_start, line1_end, line2_start, line2_end):
     return intersect_mask
 
 
-@LOSSES.register_module()
+@MODELS.register_module()
 class PlanCollisionLoss(nn.Module):
     """Planning constraint to push ego vehicle away from other agents.
 
@@ -258,7 +257,6 @@ class PlanCollisionLoss(nn.Module):
         return loss_bbox
 
 
-@mmcv.jit(derivate=True, coderize=True)
 @weighted_loss
 def plan_col_loss(
     pred,
@@ -316,7 +314,7 @@ def plan_col_loss(
     return loss
 
 
-@LOSSES.register_module()
+@MODELS.register_module()
 class PlanMapDirectionLoss(nn.Module):
     """Planning loss to force the ego heading angle consistent with lane direction.
 
@@ -387,7 +385,6 @@ class PlanMapDirectionLoss(nn.Module):
         return loss_bbox
 
 
-@mmcv.jit(derivate=True, coderize=True)
 @weighted_loss
 def plan_map_dir_loss(pred, target, dis_thresh=2.0):
     """Planning ego-map directional loss.

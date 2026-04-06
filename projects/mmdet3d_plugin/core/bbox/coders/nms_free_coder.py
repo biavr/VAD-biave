@@ -1,7 +1,7 @@
 import torch
 
-from mmdet.core.bbox import BaseBBoxCoder
-from mmdet.core.bbox.builder import BBOX_CODERS
+from mmdet.models.task_modules.coders.base_bbox_coder import BaseBBoxCoder
+from mmdet.models.task_modules import BBOX_CODERS
 from projects.mmdet3d_plugin.core.bbox.util import denormalize_bbox
 import numpy as np
 

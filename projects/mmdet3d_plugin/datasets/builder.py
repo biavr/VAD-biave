@@ -5,14 +5,27 @@ import platform
 import random
 from functools import partial
 
+# MMEngine is the new home for Registry tools
+from mmengine.registry import Registry, build_from_cfg
+# Use mmdet3d's unified registry
+from mmdet3d.registry import DATASETS 
+
+# In 2026, _concat_dataset is usually not needed as ConcatDataset 
+# handles the logic, but if you must keep the legacy call:
+try:
+    from mmdet.datasets.builder import _concat_dataset
+except ImportError:
+    # Fallback for modern MMDet 3.x
+    _concat_dataset = None
+
 import numpy as np
-from mmcv.parallel import collate
-from mmcv.runner import get_dist_info
-from mmcv.utils import Registry, build_from_cfg
+from mmengine.dataset import pseudo_collate as collate
+from mmengine.dist import get_dist_info
+from mmengine.registry import Registry, build_from_cfg
 from torch.utils.data import DataLoader
 
-from mmdet.datasets.samplers import GroupSampler
 from projects.mmdet3d_plugin.datasets.samplers.group_sampler import DistributedGroupSampler
+from mmengine.dataset import DefaultSampler as GroupSampler
 from projects.mmdet3d_plugin.datasets.samplers.distributed_sampler import DistributedSampler
 from projects.mmdet3d_plugin.datasets.samplers.sampler import build_sampler
 
@@ -90,7 +103,8 @@ def build_dataloader(dataset,
         batch_size=batch_size,
         sampler=sampler,
         num_workers=num_workers,
-        collate_fn=partial(collate, samples_per_gpu=samples_per_gpu),
+        # collate_fn=partial(collate, samples_per_gpu=samples_per_gpu),
+        collate_fn=collate,
         pin_memory=False,
         worker_init_fn=init_fn,
         **kwargs)
@@ -108,10 +122,14 @@ def worker_init_fn(worker_id, num_workers, rank, seed):
 
 # Copyright (c) OpenMMLab. All rights reserved.
 import platform
-from mmcv.utils import Registry, build_from_cfg
+from mmengine.registry import Registry, build_from_cfg
 
-from mmdet.datasets import DATASETS
-from mmdet.datasets.builder import _concat_dataset
+from mmdet3d.registry import DATASETS
+try:
+    from mmdet.datasets.builder import _concat_dataset
+except ImportError:
+    # Fallback for modern MMDet 3.x
+    _concat_dataset = None
 
 if platform.system() != 'Windows':
     # https://github.com/pytorch/pytorch/issues/973

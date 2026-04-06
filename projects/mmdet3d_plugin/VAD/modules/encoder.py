@@ -3,11 +3,34 @@ from projects.mmdet3d_plugin.models.utils.visual import save_tensor
 from .custom_base_transformer_layer import MyCustomBaseTransformerLayer
 import copy
 import warnings
-from mmcv.cnn.bricks.registry import (ATTENTION,
-                                      TRANSFORMER_LAYER,
-                                      TRANSFORMER_LAYER_SEQUENCE)
+from mmengine.registry import MODELS
+
 from mmcv.cnn.bricks.transformer import TransformerLayerSequence
-from mmcv.runner import force_fp32, auto_fp16
+
+import functools
+from mmengine.runner import autocast
+
+# If you need to "force" it as a decorator for legacy code:
+def auto_fp16(apply_to=None, out_fp32=False):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # We ignore apply_to because modern autocast handles it globally
+            with autocast(device_type='cuda', enabled=True):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def force_fp32(apply_to=None, out_fp16=False):
+    """A robust manual fix for the missing decorator"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            # This forces the block to run in float32 regardless of global settings
+            with autocast(enabled=False):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
 import numpy as np
 import torch
 import cv2 as cv
@@ -18,7 +41,7 @@ ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
 
 
-@TRANSFORMER_LAYER_SEQUENCE.register_module()
+@MODELS.register_module()
 class BEVFormerEncoder(TransformerLayerSequence):
 
     """
@@ -229,7 +252,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
         return output
 
 
-@TRANSFORMER_LAYER.register_module()
+@MODELS.register_module()
 class BEVFormerLayer(MyCustomBaseTransformerLayer):
     """Implements decoder layer in DETR transformer.
     Args:

@@ -9,9 +9,10 @@ from nuscenes.map_expansion.map_api import locations as LOCATIONS
 from PIL import Image
 
 
-from mmdet3d.core.points import BasePoints, get_points_type
-from mmdet.datasets.builder import PIPELINES
-from mmdet.datasets.pipelines import LoadAnnotations
+from mmdet3d.structures.points import BasePoints, get_points_type
+# from mmdet.datasets.builder import PIPELINES
+from mmdet.registry import TRANSFORMS
+from mmdet.datasets.transforms import LoadAnnotations
 
 def load_augmented_point_cloud(path, virtual=False, reduce_beams=32):
     # NOTE: following Tianwei's implementation, it is hard coded for nuScenes
@@ -112,7 +113,7 @@ def reduce_LiDAR_beams(pts, reduce_beams_to=32):
     # print(points.size())
     return points.numpy()
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class CustomLoadPointsFromMultiSweeps:
     """Load points from multiple sweeps.
 
@@ -268,7 +269,7 @@ class CustomLoadPointsFromMultiSweeps:
 
 
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class CustomLoadPointsFromFile:
     """Load Points From File.
 

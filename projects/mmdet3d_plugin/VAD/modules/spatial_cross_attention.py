@@ -4,15 +4,30 @@ import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import xavier_init, constant_init
-from mmcv.cnn.bricks.registry import (ATTENTION,
-                                      TRANSFORMER_LAYER,
-                                      TRANSFORMER_LAYER_SEQUENCE)
+from mmengine.model import xavier_init, constant_init
+# from mmcv.cnn import xavier_init, constant_init
+from mmengine.registry import MODELS
 from mmcv.cnn.bricks.transformer import build_attention
 import math
-from mmcv.runner import force_fp32, auto_fp16
 
-from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
+# Instead of auto_fp16, use this for modern compatibility:
+from mmengine.runner import autocast
+
+# If you need to "force" it as a decorator for legacy code:
+def auto_fp16(func):
+    return autocast(dtype=torch.float16)(func)
+
+def force_fp32(apply_to=None, out_fp16=False):
+    """A robust manual fix for the missing decorator"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            # This forces the block to run in float32 regardless of global settings
+            with autocast(enabled=False):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+from mmengine.model import BaseModule, ModuleList, Sequential
 
 from mmcv.utils import ext_loader
 from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32, \
@@ -22,7 +37,7 @@ ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
 
 
-@ATTENTION.register_module()
+@MODELS.register_module()
 class SpatialCrossAttention(BaseModule):
     """An attention module used in BEVFormer.
     Args:
@@ -169,7 +184,7 @@ class SpatialCrossAttention(BaseModule):
         return self.dropout(slots) + inp_residual
 
 
-@ATTENTION.register_module()
+@MODELS.register_module()
 class MSDeformableAttention3D(BaseModule):
     """An attention module used in BEVFormer based on Deformable-Detr.
     `Deformable DETR: Deformable Transformers for End-to-End Object Detection.

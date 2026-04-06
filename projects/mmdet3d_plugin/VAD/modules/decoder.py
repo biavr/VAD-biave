@@ -8,13 +8,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mmcv.cnn import xavier_init, constant_init
-from mmcv.cnn.bricks.registry import (ATTENTION,
-                                      TRANSFORMER_LAYER_SEQUENCE)
+from mmengine.model import xavier_init, constant_init
+from mmengine.registry import MODELS
+
 from mmcv.cnn.bricks.transformer import TransformerLayerSequence
 import math
-from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
-from mmcv.utils import (ConfigDict, build_from_cfg, deprecated_api_warning,
+from mmengine.model import BaseModule, ModuleList, Sequential
+from mmengine import (ConfigDict, build_from_cfg, deprecated_api_warning,
                         to_2tuple)
 
 from mmcv.utils import ext_loader
@@ -43,7 +43,7 @@ def inverse_sigmoid(x, eps=1e-5):
     return torch.log(x1 / x2)
 
 
-@TRANSFORMER_LAYER_SEQUENCE.register_module()
+@MODELS.register_module()
 class DetectionTransformerDecoder(TransformerLayerSequence):
     """Implements the decoder in DETR3D transformer.
     Args:
@@ -85,9 +85,9 @@ class DetectionTransformerDecoder(TransformerLayerSequence):
         intermediate = []
         intermediate_reference_points = []
         for lid, layer in enumerate(self.layers):
-
             reference_points_input = reference_points[..., :2].unsqueeze(
                 2)  # BS NUM_QUERY NUM_LEVEL 2
+            # print(f"args: {args}, kwargs: {kwargs.keys()}")
             output = layer(
                 output,
                 *args,
@@ -123,7 +123,7 @@ class DetectionTransformerDecoder(TransformerLayerSequence):
         return output, reference_points
 
 
-@ATTENTION.register_module()
+@MODELS.register_module()
 class CustomMSDeformableAttention(BaseModule):
     """An attention module used in Deformable-Detr.
 

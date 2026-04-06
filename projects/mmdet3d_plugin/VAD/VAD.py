@@ -2,21 +2,45 @@ import time
 import copy
 
 import torch
-from mmdet.models import DETECTORS
-from mmdet3d.core import bbox3d2result
-from mmcv.runner import force_fp32, auto_fp16
+from mmdet3d.registry import MODELS
+from mmdet3d.structures.ops import bbox3d2result
 from scipy.optimize import linear_sum_assignment
 from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
 
 from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 from projects.mmdet3d_plugin.VAD.planner.metric_stp3 import PlanningMetric
 
+import functools
+from mmengine.runner import autocast
 
-@DETECTORS.register_module()
+# If you need to "force" it as a decorator for legacy code:
+def auto_fp16(apply_to=None, out_fp32=False):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # We ignore apply_to because modern autocast handles it globally
+            with autocast(device_type='cuda', enabled=True):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+def force_fp32(apply_to=None, out_fp16=False):
+    """A robust manual fix for the missing decorator"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            # This forces the block to run in float32 regardless of global settings
+            with autocast(enabled=False):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+@MODELS.register_module()
 class VAD(MVXTwoStageDetector):
     """VAD model.
     """
     def __init__(self,
+                 data_preprocessor=None,
                  use_grid_mask=False,
                  pts_voxel_layer=None,
                  pts_voxel_encoder=None,
@@ -38,11 +62,20 @@ class VAD(MVXTwoStageDetector):
                  ):
 
         super(VAD,
-              self).__init__(pts_voxel_layer, pts_voxel_encoder,
-                             pts_middle_encoder, pts_fusion_layer,
-                             img_backbone, pts_backbone, img_neck, pts_neck,
-                             pts_bbox_head, img_roi_head, img_rpn_head,
-                             train_cfg, test_cfg, pretrained)
+              self).__init__(pts_voxel_encoder,
+                             pts_middle_encoder, 
+                             pts_fusion_layer,
+                             img_backbone, 
+                             pts_backbone, 
+                             img_neck, 
+                             pts_neck,
+                             pts_bbox_head, 
+                             img_roi_head, 
+                             img_rpn_head,
+                             train_cfg, 
+                             test_cfg, 
+                             pretrained,
+                             data_preprocessor)
         self.grid_mask = GridMask(
             True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
         self.use_grid_mask = use_grid_mask
@@ -71,6 +104,11 @@ class VAD(MVXTwoStageDetector):
             # # update real input shape of each single img
             # for img_meta in img_metas:
             #     img_meta.update(input_shape=input_shape)
+            if img.shape[-1] == 3: # Check if channels are at the end
+                if img.dim() == 5: # [B, N, H, W, 3] -> [B, N, 3, H, W]
+                    img = img.permute(0, 1, 4, 2, 3).contiguous()
+                elif img.dim() == 4: # [B*N, H, W, 3] -> [B*N, 3, H, W]
+                    img = img.permute(0, 3, 1, 2).contiguous()
 
             if img.dim() == 5 and img.size(0) == 1:
                 img.squeeze_()
@@ -149,20 +187,51 @@ class VAD(MVXTwoStageDetector):
         dummy_metas = None
         return self.forward_test(img=img, img_metas=[[dummy_metas]])
 
-    def forward(self, return_loss=True, **kwargs):
-        """Calls either forward_train or forward_test depending on whether
-        return_loss=True.
-        Note this setting will change the expected inputs. When
-        `return_loss=True`, img and img_metas are single-nested (i.e.
-        torch.Tensor and list[dict]), and when `resturn_loss=False`, img and
-        img_metas should be double nested (i.e.  list[torch.Tensor],
-        list[list[dict]]), with the outer list indicating test time
-        augmentations.
+    # def forward(self, return_loss=True, **kwargs):
+    #     """Calls either forward_train or forward_test depending on whether
+    #     return_loss=True.
+    #     Note this setting will change the expected inputs. When
+    #     `return_loss=True`, img and img_metas are single-nested (i.e.
+    #     torch.Tensor and list[dict]), and when `resturn_loss=False`, img and
+    #     img_metas should be double nested (i.e.  list[torch.Tensor],
+    #     list[list[dict]]), with the outer list indicating test time
+    #     augmentations.
+    #     """
+    #     if return_loss:
+    #         return self.forward_train(**kwargs)
+    #     else:
+    #         return self.forward_test(**kwargs)
+
+    def forward(self, inputs, data_samples=None, mode='loss', **kwargs):
+        """Standard MMEngine forward interface.
+        
+        Args:
+            inputs (dict | torch.Tensor): If dict, contains 'img'.
+            data_samples (list[:obj:`Det3DDataSample`]): Annotations and metas.
+            mode (str): 'loss' for training.
         """
-        if return_loss:
-            return self.forward_train(**kwargs)
+        # print(f">>> Forward called with mode={mode}. Ensure this is intended for the current phase (train/test).")
+        # 1. Safely extract the image tensor
+        if isinstance(inputs, dict):
+            # print(">>> Input is a dict. Extracting 'img' key for processing.")
+            # print(f">>> Available keys in inputs: {list(inputs.keys())}")
+            img = inputs.get('imgs', inputs.get('img', None))
         else:
-            return self.forward_test(**kwargs)
+            # print(">>> Input is a tensor. Using it directly as 'img'.")
+            img = inputs
+
+        if mode == 'loss':
+            # Map MMEngine args to legacy forward_train args
+            if img is None:
+                raise RuntimeError("The 'img' tensor is None. Check if the key innuscenes_vad_dataset.py matches 'img'.")
+            return self.forward_train(img=img, data_samples=data_samples, **kwargs)
+        elif mode == 'predict':
+            # Note: Ensure simple_test is used for prediction/inference
+            return self.simple_test(img=img, data_samples=data_samples, **kwargs)
+        elif mode == 'tensor':
+            return self.extract_feat(img=img)
+        else:
+            raise RuntimeError(f'Invalid mode "{mode}".')
     
     def obtain_history_bev(self, imgs_queue, img_metas_list):
         """Obtain history BEV features iteratively. To save GPU memory, gradients are not calculated.
@@ -175,80 +244,172 @@ class VAD(MVXTwoStageDetector):
             imgs_queue = imgs_queue.reshape(bs*len_queue, num_cams, C, H, W)
             img_feats_list = self.extract_feat(img=imgs_queue, len_queue=len_queue)
             for i in range(len_queue):
-                img_metas = [each[i] for each in img_metas_list]
-                # img_feats = self.extract_feat(img=img, img_metas=img_metas)
+                # FIX: In MMEngine, img_metas_list is a list of batch samples.
+                # Each sample's metainfo contains the temporal info we need.
+                # If your dataset's union2one put the temporal metas into a sub-key:
+                img_metas = []
+                for batch_idx in range(bs):
+                    # Attempt to get the i-th frame metadata for this batch item
+                    # Check if the metadata is indexed by integers (legacy) or a list
+                    sample_metas = img_metas_list[batch_idx]
+                    if isinstance(sample_metas, dict) and i in sample_metas:
+                        img_metas.append(sample_metas[i])
+                    elif isinstance(sample_metas, (list, tuple)):
+                        img_metas.append(sample_metas[i])
+                    else:
+                        # Fallback: if it's not indexed, use the sample_metas itself
+                        img_metas.append(sample_metas)
+
                 img_feats = [each_scale[:, i] for each_scale in img_feats_list]
                 prev_bev = self.pts_bbox_head(
                     img_feats, img_metas, prev_bev, only_bev=True)
+            
             self.train()
             return prev_bev
 
     # @auto_fp16(apply_to=('img', 'points'))
+    # @force_fp32(apply_to=('img','points','prev_bev'))
+    # def forward_train(self,
+    #                   points=None,
+    #                   img_metas=None,
+    #                   gt_bboxes_3d=None,
+    #                   gt_labels_3d=None,
+    #                   map_gt_bboxes_3d=None,
+    #                   map_gt_labels_3d=None,
+    #                   gt_labels=None,
+    #                   gt_bboxes=None,
+    #                   img=None,
+    #                   proposals=None,
+    #                   gt_bboxes_ignore=None,
+    #                   map_gt_bboxes_ignore=None,
+    #                   img_depth=None,
+    #                   img_mask=None,
+    #                   ego_his_trajs=None,
+    #                   ego_fut_trajs=None,
+    #                   ego_fut_masks=None,
+    #                   ego_fut_cmd=None,
+    #                   ego_lcf_feat=None,
+    #                   gt_attr_labels=None
+    #                   ):
+    #     """Forward training function.
+    #     Args:
+    #         points (list[torch.Tensor], optional): Points of each sample.
+    #             Defaults to None.
+    #         img_metas (list[dict], optional): Meta information of each sample.
+    #             Defaults to None.
+    #         gt_bboxes_3d (list[:obj:`BaseInstance3DBoxes`], optional):
+    #             Ground truth 3D boxes. Defaults to None.
+    #         gt_labels_3d (list[torch.Tensor], optional): Ground truth labels
+    #             of 3D boxes. Defaults to None.
+    #         gt_labels (list[torch.Tensor], optional): Ground truth labels
+    #             of 2D boxes in images. Defaults to None.
+    #         gt_bboxes (list[torch.Tensor], optional): Ground truth 2D boxes in
+    #             images. Defaults to None.
+    #         img (torch.Tensor optional): Images of each sample with shape
+    #             (N, C, H, W). Defaults to None.
+    #         proposals ([list[torch.Tensor], optional): Predicted proposals
+    #             used for training Fast RCNN. Defaults to None.
+    #         gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
+    #             2D boxes in images to be ignored. Defaults to None.
+    #     Returns:
+    #         dict: Losses of different branches.
+    #     """
+        
+    #     len_queue = img.size(1)
+    #     prev_img = img[:, :-1, ...]
+    #     img = img[:, -1, ...]
+
+    #     prev_img_metas = copy.deepcopy(img_metas)
+    #     # prev_bev = self.obtain_history_bev(prev_img, prev_img_metas)
+    #     # import pdb;pdb.set_trace()
+    #     prev_bev = self.obtain_history_bev(prev_img, prev_img_metas) if len_queue > 1 else None
+
+    #     img_metas = [each[len_queue-1] for each in img_metas]
+    #     img_feats = self.extract_feat(img=img, img_metas=img_metas)
+    #     losses = dict()
+    #     losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d,
+    #                                         map_gt_bboxes_3d, map_gt_labels_3d, img_metas,
+    #                                         gt_bboxes_ignore, map_gt_bboxes_ignore, prev_bev,
+    #                                         ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
+    #                                         ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
+    #                                         ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels)
+
+    #     losses.update(losses_pts)
+    #     return losses
+
     @force_fp32(apply_to=('img','points','prev_bev'))
     def forward_train(self,
-                      points=None,
-                      img_metas=None,
-                      gt_bboxes_3d=None,
-                      gt_labels_3d=None,
-                      map_gt_bboxes_3d=None,
-                      map_gt_labels_3d=None,
-                      gt_labels=None,
-                      gt_bboxes=None,
                       img=None,
-                      proposals=None,
-                      gt_bboxes_ignore=None,
-                      map_gt_bboxes_ignore=None,
-                      img_depth=None,
-                      img_mask=None,
-                      ego_his_trajs=None,
-                      ego_fut_trajs=None,
-                      ego_fut_masks=None,
-                      ego_fut_cmd=None,
-                      ego_lcf_feat=None,
-                      gt_attr_labels=None
-                      ):
-        """Forward training function.
-        Args:
-            points (list[torch.Tensor], optional): Points of each sample.
-                Defaults to None.
-            img_metas (list[dict], optional): Meta information of each sample.
-                Defaults to None.
-            gt_bboxes_3d (list[:obj:`BaseInstance3DBoxes`], optional):
-                Ground truth 3D boxes. Defaults to None.
-            gt_labels_3d (list[torch.Tensor], optional): Ground truth labels
-                of 3D boxes. Defaults to None.
-            gt_labels (list[torch.Tensor], optional): Ground truth labels
-                of 2D boxes in images. Defaults to None.
-            gt_bboxes (list[torch.Tensor], optional): Ground truth 2D boxes in
-                images. Defaults to None.
-            img (torch.Tensor optional): Images of each sample with shape
-                (N, C, H, W). Defaults to None.
-            proposals ([list[torch.Tensor], optional): Predicted proposals
-                used for training Fast RCNN. Defaults to None.
-            gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
-                2D boxes in images to be ignored. Defaults to None.
-        Returns:
-            dict: Losses of different branches.
-        """
+                      data_samples=None,
+                      **kwargs):
+        """Forward training function modernized for MMEngine.
+        """        
+        # 1. Get the GPU device from the model's weights
+        device = next(self.parameters()).device
         
+        if img is None and data_samples is not None:
+            img = data_samples[0].get('img', None)
+
+        if img is None:
+            raise RuntimeError("CRITICAL: Image tensor not found.")
+
+        # 2. Handle the List Case (This is where your error happens)
+        if isinstance(img, list):
+            # We must use torch.stack to combine a list of [6, 3, H, W] 
+            # into a single [N, 6, 3, H, W] tensor.
+            img = torch.stack([torch.as_tensor(i) for i in img])
+        
+        # 3. Final conversion and move to GPU
+        if not torch.is_tensor(img):
+            img = torch.as_tensor(img)
+            
+        img = img.to(device).float()
+
+        # 2. Extract Meta Information and GT
+        # img_metas = [ds.metainfo for ds in data_samples]
+        img_metas = [ds.get('img_metas') for ds in data_samples]
+        gt_bboxes_3d = [ds.gt_instances_3d.bboxes_3d for ds in data_samples]
+        gt_labels_3d = [ds.gt_instances_3d.labels_3d for ds in data_samples]
+        map_gt_bboxes_3d = [ds.get('map_gt_bboxes_3d') for ds in data_samples]
+        map_gt_labels_3d = [ds.get('map_gt_labels_3d') for ds in data_samples]
+
+        # 3. Refined safe_tensor helper (uses the model's 'device')
+        def safe_tensor(ds, key, shape_if_none):
+            val = ds.get(key)
+            if val is None:
+                return torch.zeros(shape_if_none).to(device)
+            if not torch.is_tensor(val):
+                val = torch.as_tensor(val)
+            return val.to(device).float()
+
+        # 4. Use the helper (REMOVED .to(img.device) from the end)
+        ego_his_trajs = torch.stack([safe_tensor(ds, 'ego_his_trajs', (1, 2)) for ds in data_samples])
+        ego_fut_trajs = torch.stack([safe_tensor(ds, 'ego_fut_trajs', (6, 2)) for ds in data_samples])
+        ego_fut_masks = torch.stack([safe_tensor(ds, 'ego_fut_masks', (6,)) for ds in data_samples])
+        ego_fut_cmd = torch.stack([safe_tensor(ds, 'ego_fut_cmd', (3,)) for ds in data_samples])
+        ego_lcf_feat = torch.stack([safe_tensor(ds, 'ego_lcf_feat', (9,)) for ds in data_samples])
+        gt_attr_labels = [ds.get('gt_attr_labels') for ds in data_samples]
+
+        # Proceed with legacy logic...
         len_queue = img.size(1)
+
         prev_img = img[:, :-1, ...]
-        img = img[:, -1, ...]
+        img_curr = img[:, -1, ...] # Rename to avoid conflict with the 5D 'img'
 
         prev_img_metas = copy.deepcopy(img_metas)
-        # prev_bev = self.obtain_history_bev(prev_img, prev_img_metas)
-        # import pdb;pdb.set_trace()
         prev_bev = self.obtain_history_bev(prev_img, prev_img_metas) if len_queue > 1 else None
 
-        img_metas = [each[len_queue-1] for each in img_metas]
-        img_feats = self.extract_feat(img=img, img_metas=img_metas)
+        img_metas_curr = [each[len_queue-1] for each in img_metas]
+        img_feats = self.extract_feat(img=img_curr, img_metas=img_metas_curr)
+        
         losses = dict()
-        losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d,
-                                            map_gt_bboxes_3d, map_gt_labels_3d, img_metas,
-                                            gt_bboxes_ignore, map_gt_bboxes_ignore, prev_bev,
-                                            ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
-                                            ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
-                                            ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels)
+        losses_pts = self.forward_pts_train(
+            img_feats, gt_bboxes_3d, gt_labels_3d,
+            map_gt_bboxes_3d, map_gt_labels_3d, img_metas_curr,
+            prev_bev=prev_bev,
+            ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
+            ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
+            ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels)
 
         losses.update(losses_pts)
         return losses

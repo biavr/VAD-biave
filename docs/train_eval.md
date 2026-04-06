@@ -8,7 +8,11 @@
 ```shell
 cd /path/to/VAD
 conda activate vad
-python -m torch.distributed.run --nproc_per_node=8 --master_port=2333 tools/train.py projects/configs/VAD/VAD_base.py --launcher pytorch --deterministic --work-dir path/to/save/outputs
+CUDA_VISIBLE_DEVICES=2 python -m torch.distributed.run --nproc_per_node=1 --master_port=2333 tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --launcher none --deterministic --work-dir /workspace/logs/outputs
+
+CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.run --nproc_per_node=1 --master_port=2333 tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --launcher none --deterministic --work-dir /workspace/logs/outputs
+
+CUDA_VISIBLE_DEVICES=5 python tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --work-dir /workspace/logs/outputs
 ```
 
 **NOTE**: We release two types of training configs: the end-to-end configs and the two-stage (stage-1: Perception & Prediction; stage-2: Planning) configs. They should produce similar results. The two-stage configs are recommended because you can just train the stage-1 model once and use it as a pre-train model for stage-2.

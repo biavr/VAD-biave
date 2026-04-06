@@ -1,4 +1,4 @@
-from mmdet.core.bbox.transforms import bbox_xyxy_to_cxcywh, bbox_cxcywh_to_xyxy
+from mmdet.structures.bbox import bbox_xyxy_to_cxcywh, bbox_cxcywh_to_xyxy
 
 def normalize_2d_bbox(bboxes, pc_range):
 

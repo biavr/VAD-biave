@@ -1,13 +1,15 @@
 import numpy as np
 from numpy import random
 import mmcv
-from mmdet.datasets.builder import PIPELINES
-from mmcv.parallel import DataContainer as DC
-from mmdet3d.core.bbox import (CameraInstance3DBoxes, DepthInstance3DBoxes,
-                               LiDARInstance3DBoxes, box_np_ops)
+from mmdet.registry import TRANSFORMS
+from mmengine.dataset import Compose
+from mmengine.structures import InstanceData
+from mmdet3d.structures import (CameraInstance3DBoxes, DepthInstance3DBoxes,
+                               LiDARInstance3DBoxes)
+from mmdet3d.structures.ops import box_np_ops
 
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class CustomObjectRangeFilter(object):
     """Filter objects by the range, and also filter corresponding fut trajs
 
@@ -44,8 +46,8 @@ class CustomObjectRangeFilter(object):
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool)]
-        gt_attr_labels = gt_attr_labels[mask.numpy().astype(np.bool)]
+        gt_labels_3d = gt_labels_3d[mask.numpy().astype(bool)]
+        gt_attr_labels = gt_attr_labels[mask.numpy().astype(bool)]
 
         # limit rad to [-pi, pi]
         gt_bboxes_3d.limit_yaw(offset=0.5, period=2 * np.pi)
@@ -62,7 +64,7 @@ class CustomObjectRangeFilter(object):
         return repr_str
 
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class CustomObjectNameFilter(object):
     """Filter GT objects by their names, , and also filter corresponding fut trajs
 
@@ -100,7 +102,7 @@ class CustomObjectNameFilter(object):
         return repr_str
 
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class PadMultiViewImage(object):
     """Pad the multi-view image.
     There are two padding modes: (1) pad to a fixed size and (2) pad to the
@@ -154,7 +156,7 @@ class PadMultiViewImage(object):
         return repr_str
 
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class NormalizeMultiviewImage(object):
     """Normalize the image.
     Added key is "img_norm_cfg".
@@ -191,7 +193,7 @@ class NormalizeMultiviewImage(object):
         return repr_str
 
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class PhotoMetricDistortionMultiViewImage:
     """Apply photometric distortion to image sequentially, every transformation
     is applied with a probability of 0.5. The position of random contrast is in
@@ -292,7 +294,7 @@ class PhotoMetricDistortionMultiViewImage:
 
 
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class CustomCollect3D(object):
     """Collect data from the loader relevant to the specific task.
     This is usually the last stage of the data loader pipeline. Typically keys
@@ -369,7 +371,8 @@ class CustomCollect3D(object):
             if key in results:
                 img_metas[key] = results[key]
 
-        data['img_metas'] = DC(img_metas, cpu_only=True)
+        # data['img_metas'] = DC(img_metas, cpu_only=True)
+        data['img_metas'] = img_metas
         for key in self.keys:
             data[key] = results[key]
         return data
@@ -381,7 +384,7 @@ class CustomCollect3D(object):
 
 
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class RandomScaleImageMultiViewImage(object):
     """Random scale the image
     Args:
@@ -423,7 +426,7 @@ class RandomScaleImageMultiViewImage(object):
         return repr_str
     
 
-@PIPELINES.register_module()
+@TRANSFORMS.register_module()
 class CustomPointsRangeFilter:
     """Filter points by the range.
     Args:
