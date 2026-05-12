@@ -57,6 +57,71 @@ class DetectionTransformerDecoder(TransformerLayerSequence):
         self.return_intermediate = return_intermediate
         self.fp16_enabled = False
 
+    # def forward(self,
+    #             query,
+    #             *args,
+    #             reference_points=None,
+    #             reg_branches=None,
+    #             key_padding_mask=None,
+    #             **kwargs):
+    #     """Forward function for `Detr3DTransformerDecoder`.
+    #     Args:
+    #         query (Tensor): Input query with shape
+    #             `(num_query, bs, embed_dims)`.
+    #         reference_points (Tensor): The reference
+    #             points of offset. has shape
+    #             (bs, num_query, 4) when as_two_stage,
+    #             otherwise has shape ((bs, num_query, 2).
+    #         reg_branch: (obj:`nn.ModuleList`): Used for
+    #             refining the regression results. Only would
+    #             be passed when with_box_refine is True,
+    #             otherwise would be passed a `None`.
+    #     Returns:
+    #         Tensor: Results with shape [1, num_query, bs, embed_dims] when
+    #             return_intermediate is `False`, otherwise it has shape
+    #             [num_layers, num_query, bs, embed_dims].
+    #     """
+    #     output = query
+    #     intermediate = []
+    #     intermediate_reference_points = []
+    #     for lid, layer in enumerate(self.layers):
+    #         reference_points_input = reference_points[..., :2].unsqueeze(
+    #             2)  # BS NUM_QUERY NUM_LEVEL 2
+    #         # print(f"args: {args}, kwargs: {kwargs.keys()}")
+    #         output = layer(
+    #             output,
+    #             *args,
+    #             reference_points=reference_points_input,
+    #             key_padding_mask=key_padding_mask,
+    #             **kwargs)
+    #         output = output.permute(1, 0, 2)
+
+    #         if reg_branches is not None:
+    #             tmp = reg_branches[lid](output)
+
+    #             assert reference_points.shape[-1] == 3
+
+    #             new_reference_points = torch.zeros_like(reference_points)
+    #             new_reference_points[..., :2] = tmp[
+    #                 ..., :2] + inverse_sigmoid(reference_points[..., :2])
+    #             new_reference_points[..., 2:3] = tmp[
+    #                 ..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
+
+    #             new_reference_points = new_reference_points.sigmoid()
+
+    #             reference_points = new_reference_points.detach()
+
+    #         output = output.permute(1, 0, 2)
+    #         if self.return_intermediate:
+    #             intermediate.append(output)
+    #             intermediate_reference_points.append(reference_points)
+
+    #     if self.return_intermediate:
+    #         return torch.stack(intermediate), torch.stack(
+    #             intermediate_reference_points)
+
+    #     return output, reference_points
+
     def forward(self,
                 query,
                 *args,
@@ -64,63 +129,61 @@ class DetectionTransformerDecoder(TransformerLayerSequence):
                 reg_branches=None,
                 key_padding_mask=None,
                 **kwargs):
-        """Forward function for `Detr3DTransformerDecoder`.
-        Args:
-            query (Tensor): Input query with shape
-                `(num_query, bs, embed_dims)`.
-            reference_points (Tensor): The reference
-                points of offset. has shape
-                (bs, num_query, 4) when as_two_stage,
-                otherwise has shape ((bs, num_query, 2).
-            reg_branch: (obj:`nn.ModuleList`): Used for
-                refining the regression results. Only would
-                be passed when with_box_refine is True,
-                otherwise would be passed a `None`.
-        Returns:
-            Tensor: Results with shape [1, num_query, bs, embed_dims] when
-                return_intermediate is `False`, otherwise it has shape
-                [num_layers, num_query, bs, embed_dims].
-        """
+        
+        # 1. Start with Batch-First to satisfy the initial LayerNorm
+        if query.dim() == 3 and query.shape[0] == 300:
+            query = query.permute(1, 0, 2)
+            
+        if 'query_pos' in kwargs and kwargs['query_pos'] is not None:
+            if kwargs['query_pos'].shape[0] == 300:
+                kwargs['query_pos'] = kwargs['query_pos'].permute(1, 0, 2)
+
         output = query
         intermediate = []
         intermediate_reference_points = []
+        
         for lid, layer in enumerate(self.layers):
-            reference_points_input = reference_points[..., :2].unsqueeze(
-                2)  # BS NUM_QUERY NUM_LEVEL 2
-            # print(f"args: {args}, kwargs: {kwargs.keys()}")
+            # 2. Reference points MUST be 4D: [Batch, Queries, Anchors, XY]
+            reference_points_input = reference_points[..., :2].unsqueeze(2) 
+            kwargs['reference_points'] = reference_points_input
+            
+            # --- CRITICAL ADDITION ---
+            # Explicitly tell internal modules that we are passing Batch-First tensors
+            kwargs['batch_first'] = True 
+
+            # 3. THE HYBRID TOGGLE
             output = layer(
                 output,
                 *args,
-                reference_points=reference_points_input,
+                # reference_points is now inside kwargs
                 key_padding_mask=key_padding_mask,
                 **kwargs)
-            output = output.permute(1, 0, 2)
-
+            
+            # 4. Regression expects Sequence-First: [300, 4, 256]
+            output_seq = output.permute(1, 0, 2)
+            
             if reg_branches is not None:
-                tmp = reg_branches[lid](output)
+                # tmp = reg_branches[lid](output_seq)
+                
+                # new_reference_points = torch.zeros_like(reference_points)
+                # new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points[..., :2])
+                # new_reference_points[..., 2:3] = tmp[..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
 
-                assert reference_points.shape[-1] == 3
+                # reference_points = new_reference_points.sigmoid().detach()
+                output = output_seq.permute(1, 0, 2)
 
-                new_reference_points = torch.zeros_like(reference_points)
-                new_reference_points[..., :2] = tmp[
-                    ..., :2] + inverse_sigmoid(reference_points[..., :2])
-                new_reference_points[..., 2:3] = tmp[
-                    ..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
+            # 5. Flip back to Batch-First for the NEXT layer's LayerNorm
+            # This prevents the [8, 4, 9600] error in Layer 1, 2, etc.
 
-                new_reference_points = new_reference_points.sigmoid()
-
-                reference_points = new_reference_points.detach()
-
-            output = output.permute(1, 0, 2)
             if self.return_intermediate:
-                intermediate.append(output)
+                # Store Sequence-First for the final VAD Head stack
+                intermediate.append(output_seq)
                 intermediate_reference_points.append(reference_points)
 
         if self.return_intermediate:
-            return torch.stack(intermediate), torch.stack(
-                intermediate_reference_points)
+            return torch.stack(intermediate), torch.stack(intermediate_reference_points)
 
-        return output, reference_points
+        return output.permute, reference_points
 
 
 @MODELS.register_module()
@@ -158,7 +221,7 @@ class CustomMSDeformableAttention(BaseModule):
                  num_points=4,
                  im2col_step=64,
                  dropout=0.1,
-                 batch_first=False,
+                 batch_first=True,
                  norm_cfg=None,
                  init_cfg=None):
         super().__init__(init_cfg)

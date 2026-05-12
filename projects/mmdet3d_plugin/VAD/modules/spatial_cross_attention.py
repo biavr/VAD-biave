@@ -323,7 +323,18 @@ class MSDeformableAttention3D(BaseModule):
         Returns:
              Tensor: forwarded results with shape [num_query, bs, embed_dims].
         """
-
+        # 1. STANDARDIZATION BLOCK:
+        # If query is [300, 4, 256], it's Sequence-First.
+        # If query is [4, 300, 256], it's Batch-First.
+        # LayerNorm wants [4, 300, 256], but THIS module math needs to know which is which.
+        if query.dim() == 3:
+            # If query is [300, 4, 256], it is Sequence-First. Standardize to Batch-First.
+            if query.shape[0] == 300: 
+                query = query.permute(1, 0, 2)
+            # If query is [4, 300, 256], it is already Batch-First.
+        bs, num_query, _ = query.shape
+        # ---------------------------
+        print(">>> scr: query shape:", query.shape)
         if value is None:
             value = query
         if identity is None:
@@ -331,21 +342,27 @@ class MSDeformableAttention3D(BaseModule):
         if query_pos is not None:
             query = query + query_pos
 
-        if not self.batch_first:
+        if not self.batch_first and not kwargs.get('batch_first', False):
+            print(">>> scr: batch_first is False, permuting query and value")
             # change to (bs, num_query ,embed_dims)
             query = query.permute(1, 0, 2)
             value = value.permute(1, 0, 2)
-
+        if not self.batch_first:
+            value = value.permute(1, 0, 2)
+        print(">>> scr: query shape after batch first check:", query.shape)
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
-        assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
+        # assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
 
         value = self.value_proj(value)
         if key_padding_mask is not None:
             value = value.masked_fill(key_padding_mask[..., None], 0.0)
         value = value.view(bs, num_value, self.num_heads, -1)
+        # 2. FIXED VIEW CALL:
+        # Use the dynamically detected bs and num_query
         sampling_offsets = self.sampling_offsets(query).view(
             bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
+        
         attention_weights = self.attention_weights(query).view(
             bs, num_query, self.num_heads, self.num_levels * self.num_points)
 

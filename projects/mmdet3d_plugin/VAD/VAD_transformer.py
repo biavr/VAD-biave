@@ -406,12 +406,16 @@ class VADPerceptionTransformer(BaseModule):
 
         if self.decoder is not None:
             # [L, Q, B, D], [L, B, Q, D]
+            print("Running decoder...")
+            print("Query shape:", query.shape)
+
+            reference_points_2d = reference_points[..., :2]
             inter_states, inter_references = self.decoder(
                 query=query,
                 key=None,
                 value=bev_embed,
                 query_pos=query_pos,
-                reference_points=reference_points,
+                reference_points=reference_points_2d,
                 reg_branches=reg_branches,
                 cls_branches=cls_branches,
                 spatial_shapes=torch.tensor([[bev_h, bev_w]], device=query.device),
