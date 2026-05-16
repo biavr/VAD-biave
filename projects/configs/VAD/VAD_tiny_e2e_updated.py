@@ -98,6 +98,7 @@ model = dict(
         with_box_refine=True,
         as_two_stage=False,
         use_pe=True,
+        score_thresh=0.4,
         map_query_embed_type='instance_pts',
         map_transform_method='minmax',
         

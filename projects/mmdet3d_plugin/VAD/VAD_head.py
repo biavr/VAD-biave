@@ -1968,6 +1968,8 @@ class VADHead(DETRHead):
         # select & pad query for different batch using score_thresh
         query_score = query_score.sigmoid()
         query_score = query_score.max(dim=-1)[0]
+        if score_thresh is None:
+            score_thresh = 0.4  # Provide a fallback default value
         query_idx = query_score > score_thresh
         batch_max_qnum = 0
         for i in range(query_score.shape[0]):
