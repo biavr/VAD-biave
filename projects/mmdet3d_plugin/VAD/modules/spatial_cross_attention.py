@@ -227,7 +227,8 @@ class MSDeformableAttention3D(BaseModule):
         dim_per_head = embed_dims // num_heads
         self.norm_cfg = norm_cfg
         self.batch_first = batch_first
-        self.output_proj = None
+        # self.output_proj = None
+        self.output_proj = nn.Linear(embed_dims, embed_dims)
         self.fp16_enabled = False
 
         # you'd better set dim_per_head to a power of 2
@@ -247,6 +248,7 @@ class MSDeformableAttention3D(BaseModule):
                 'which is more efficient in our CUDA implementation.')
 
         self.im2col_step = im2col_step
+        self.dropout = nn.Dropout(dropout)
         self.embed_dims = embed_dims
         self.num_levels = num_levels
         self.num_heads = num_heads
@@ -419,7 +421,34 @@ class MSDeformableAttention3D(BaseModule):
         else:
             output = multi_scale_deformable_attn_pytorch(
                 value, spatial_shapes, sampling_locations, attention_weights)
+            
+        # if output.dim() == 4:
+        #     output = output.reshape(bs, num_query, self.embed_dims)
+        # elif output.dim() == 2:
+        #     # If it came out flattened [bs * num_query, embed_dims]
+        #     output = output.view(bs, num_query, self.embed_dims)
+        bs_total = output.shape[0]
+        output = output.reshape(bs_total, -1, self.embed_dims)
+        # 2. Now apply the linear projection
+        if self.output_proj is not None:
+            # DEBUG: Uncomment this to verify shape
+            # print(">>> scr: output shape before output_proj:", output.shape)
+            output = self.output_proj(output)
+            
+        # 3. Handle identity and batch_first
         if not self.batch_first:
             output = output.permute(1, 0, 2)
+        
+        if identity.dim() == 3 and identity.shape[0] != bs:
+             identity = identity.permute(1, 0, 2)
+        
+        # Ensure output is [Batch, Query, Embed_Dims]
+        if output.dim() == 3 and output.shape[0] != bs:
+             output = output.permute(1, 0, 2)
 
-        return output
+        # DEBUG: Final shape verification
+        if output.shape != identity.shape:
+            # If they still don't match, force align to output shape
+            identity = identity.view(output.shape)
+
+        return self.dropout(output) + identity

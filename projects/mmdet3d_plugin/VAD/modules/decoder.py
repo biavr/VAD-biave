@@ -147,43 +147,52 @@ class DetectionTransformerDecoder(TransformerLayerSequence):
             reference_points_input = reference_points[..., :2].unsqueeze(2) 
             kwargs['reference_points'] = reference_points_input
             
-            # --- CRITICAL ADDITION ---
             # Explicitly tell internal modules that we are passing Batch-First tensors
             kwargs['batch_first'] = True 
 
-            # 3. THE HYBRID TOGGLE
+            # 3. Call the Layer Wrapper (Accepts and returns Batch-First [4, 300, 256])
             output = layer(
                 output,
                 *args,
-                # reference_points is now inside kwargs
                 key_padding_mask=key_padding_mask,
                 **kwargs)
             
-            # 4. Regression expects Sequence-First: [300, 4, 256]
-            output_seq = output.permute(1, 0, 2)
-            
+            # 4. Box Regression refinement
             if reg_branches is not None:
-                # tmp = reg_branches[lid](output_seq)
+                # Pass Batch-First output to get a Batch-First tmp tensor [4, 300, channels]
+                # This explicitly avoids the [300, 4, 1] vs [4, 300, 1] expansion error
+                tmp = reg_branches[lid](output)  
                 
-                # new_reference_points = torch.zeros_like(reference_points)
-                # new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points[..., :2])
-                # new_reference_points[..., 2:3] = tmp[..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
+                is_3d = (reference_points.shape[-1] == 3)
+                
+                # Allocate a 3D tensor template [Batch, Queries, 3]
+                if is_3d:
+                    new_reference_points = torch.zeros_like(reference_points)
+                    # Refine Z coordinate using VAD tracking output array layout (index 4)
+                    new_reference_points[..., 2:3] = tmp[..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
+                else:
+                    # If incoming is 2D [Batch, Queries, 2], construct 3D by adding a Z layer
+                    bs_dim, num_q_dim = reference_points.shape[0], reference_points.shape[1]
+                    new_reference_points = reference_points.new_zeros((bs_dim, num_q_dim, 3))
+                    # Initialize Z axis coordinate inside sigmoid space (0.5 results in 0.0 after translation)
+                    new_reference_points[..., 2:3] = tmp[..., 4:5] + inverse_sigmoid(reference_points.new_tensor([0.5]))
 
-                # reference_points = new_reference_points.sigmoid().detach()
-                output = output_seq.permute(1, 0, 2)
-
-            # 5. Flip back to Batch-First for the NEXT layer's LayerNorm
-            # This prevents the [8, 4, 9600] error in Layer 1, 2, etc.
+                # Refine X and Y coordinates (common to both 2D and 3D cases)
+                new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points[..., :2])
+                
+                # Convert back through sigmoid and detach from the tracking graph
+                reference_points = new_reference_points.sigmoid().detach()
 
             if self.return_intermediate:
-                # Store Sequence-First for the final VAD Head stack
-                intermediate.append(output_seq)
+                # Store Sequence-First format as required by the final VAD Head loss collection
+                intermediate.append(output.permute(1, 0, 2))
                 intermediate_reference_points.append(reference_points)
 
         if self.return_intermediate:
             return torch.stack(intermediate), torch.stack(intermediate_reference_points)
 
-        return output.permute, reference_points
+        # Return Sequence-First output format to match VAD Head predictions
+        return output.permute(1, 0, 2), reference_points
 
 
 @MODELS.register_module()
@@ -393,7 +402,32 @@ class CustomMSDeformableAttention(BaseModule):
             output = multi_scale_deformable_attn_pytorch(
                 value, spatial_shapes, sampling_locations, attention_weights)
 
-        output = self.output_proj(output)
+        if output.dim() == 3:
+            # If the shape is [heads, batch, flattened_features], like [8, 4, 8000]
+            # where 8000 is 250 queries * 32 head dim
+            if output.shape[0] == self.num_heads:
+                output = output.view(self.num_heads, bs, num_query, self.embed_dims // self.num_heads)
+                output = output.permute(1, 2, 0, 3).reshape(bs, num_query, self.embed_dims)
+            else:
+                # If it's already a 3D tensor but flattened differently
+                output = output.reshape(bs, num_query, self.embed_dims)
+                
+        elif output.dim() == 2:
+            # If it's completely flattened into a 2D matrix [spatial_dim, channels_total]
+            # This directly resolves the (32x64000) linear algebra mismatch
+            output = output.view(bs, num_query, self.embed_dims)
+            
+        elif output.dim() == 4:
+            # Standard unflattened format: [bs, num_query, num_heads, head_dim]
+            output = output.reshape(bs, num_query, self.embed_dims)
+
+        # Ensure everything is continuous in memory before passing to linear layer
+        output = output.contiguous()
+
+        # ======================================================================
+
+        if self.output_proj is not None:
+            output = self.output_proj(output)
 
         if not self.batch_first:
             # (num_query, bs ,embed_dims)
