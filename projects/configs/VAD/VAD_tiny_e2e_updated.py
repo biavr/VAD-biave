@@ -173,6 +173,28 @@ model = dict(
                 feedforward_channels=_ffn_dim_,
                 ffn_dropout=0.1,
                 operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
+        motion_map_decoder=dict(
+            type='CustomTransformerDecoder',
+            num_layers=1,
+            return_intermediate=False,
+            transformerlayers=dict(
+                type='BaseTransformerLayer',
+                attn_cfgs=[
+                    dict(
+                        type='MultiheadAttention',
+                        embed_dims=256,
+                        num_heads=8,
+                        dropout=0.1),
+                ],
+                feedforward_channels=512,
+                ffn_dropout=0.1,
+                operation_order=(
+                    'cross_attn',
+                    'norm',
+                    'ffn',
+                    'norm',
+                )),
+        ),        
         ego_agent_decoder=dict(
             type='CustomTransformerDecoder',
             # batch_first=True,

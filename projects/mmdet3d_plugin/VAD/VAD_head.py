@@ -50,7 +50,7 @@ def force_fp32(apply_to=None, out_fp16=False):
     return decorator
 
 from mmcv.utils import TORCH_VERSION, digit_version
-from mmdet.models.task_modules import build_assigner, build_sampler, build_bbox_coder
+from mmdet.models.task_modules import PseudoSampler, build_assigner, build_sampler, build_bbox_coder
 from mmdet.models.layers.transformer import inverse_sigmoid
 from mmdet.structures.bbox import bbox_xyxy_to_cxcywh
 from mmcv.cnn import Linear
@@ -849,7 +849,13 @@ class VADHead(DETRHead):
         ego_pos = torch.zeros((batch, 1, 2), device=agent_query.device)
         ego_pos_emb = self.ego_map_pos_mlp(ego_pos)
         map_query = map_hs[-1].view(batch_size, self.map_num_vec, self.map_num_pts_per_vec, -1)
-        map_query = self.lane_encoder(map_query)  # [B, P, pts, D] -> [B, P, D]
+        # map_query = self.lane_encoder(map_query)  # [B, P, pts, D] -> [B, P, D]
+        if hasattr(self, 'lane_encoder'):
+            map_query = self.lane_encoder(map_query)  # [B, P, pts, D] -> [B, P, D]
+        elif hasattr(self, 'map_encoder'):
+            map_query = self.map_encoder(map_query)
+        else:
+            raise AttributeError("VADHead has neither 'lane_encoder' nor 'map_encoder' attributes.")
         map_conf = map_outputs_classes[-1]
         map_pos = map_outputs_coords_bev[-1]
         # use the most close pts pos in each map inst as the inst's pos
@@ -994,8 +1000,31 @@ class VADHead(DETRHead):
         assign_result = self.assigner.assign(bbox_pred, cls_score, gt_bboxes,
                                              gt_labels, gt_bboxes_ignore)
 
-        sampling_result = self.sampler.sample(assign_result, bbox_pred,
-                                              gt_bboxes)
+        # --- MMDetection 3.x Complete Container Realignment ---
+        from mmengine.structures import InstanceData
+        
+        # 1. Wrap Predictions and attach an anchor placeholder (.priors)
+        # to satisfy MMDetection 3.x sampler expectation grids
+        pred_instances = InstanceData()
+        pred_instances.bboxes = bbox_pred
+        pred_instances.scores = cls_score
+        pred_instances.priors = torch.zeros_like(bbox_pred) # Dummy priors matching bbox size
+
+        # 2. Wrap Ground-Truth Targets
+        gt_instances = InstanceData()
+        gt_instances.bboxes = gt_bboxes
+        gt_instances.labels = gt_labels
+
+        if hasattr(self, 'sampler') and self.sampler is not None:
+            # Pass unified prediction and ground-truth containers
+            sampling_result = self.sampler.sample(assign_result, pred_instances, gt_instances)
+        else:
+            # Replicate behavior dynamically using both wrapped containers
+            # This directly satisfies 'pred_instances.priors' and clears the AttributeError!
+            pseudo_sampler = PseudoSampler()
+            sampling_result = pseudo_sampler.sample(assign_result, pred_instances, gt_instances)
+        # -----------------------------------------------------
+
         pos_inds = sampling_result.pos_inds
         neg_inds = sampling_result.neg_inds
 
@@ -1003,7 +1032,7 @@ class VADHead(DETRHead):
         labels = gt_bboxes.new_full((num_bboxes,),
                                     self.num_classes,
                                     dtype=torch.long)
-        labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds]
+        labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds].long()
         label_weights = gt_bboxes.new_ones(num_bboxes)
 
         # bbox targets

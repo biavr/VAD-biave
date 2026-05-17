@@ -336,7 +336,7 @@ class MSDeformableAttention3D(BaseModule):
             # If query is [4, 300, 256], it is already Batch-First.
         bs, num_query, _ = query.shape
         # ---------------------------
-        print(">>> scr: query shape:", query.shape)
+        # print(">>> scr: query shape:", query.shape)
         if value is None:
             value = query
         if identity is None:
@@ -345,13 +345,13 @@ class MSDeformableAttention3D(BaseModule):
             query = query + query_pos
 
         if not self.batch_first and not kwargs.get('batch_first', False):
-            print(">>> scr: batch_first is False, permuting query and value")
+            # print(">>> scr: batch_first is False, permuting query and value")
             # change to (bs, num_query ,embed_dims)
             query = query.permute(1, 0, 2)
             value = value.permute(1, 0, 2)
         if not self.batch_first:
             value = value.permute(1, 0, 2)
-        print(">>> scr: query shape after batch first check:", query.shape)
+        # print(">>> scr: query shape after batch first check:", query.shape)
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
         # assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
