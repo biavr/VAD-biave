@@ -1387,14 +1387,23 @@ class VADHead(DETRHead):
         gt_fut_masks = torch.cat(gt_fut_masks_list, 0)
 
         # classification loss
-        cls_scores = cls_scores.reshape(-1, self.cls_out_channels)  # [1200, 10]
+        cls_scores = cls_scores.reshape(-1, self.cls_out_channels)  # Shape: [1200, 10]
+        labels = labels.reshape(-1).long()  # Shape: [1200]
+
+        # Convert 1D integer class labels into a 2D One-Hot Target matrix [1200, 10]
+        # to strictly satisfy PyTorch element-wise matrix operations in py_sigmoid_focal_loss
+        num_classes = self.cls_out_channels
         
-        # Force the labels array into a matching 1D integer sequence [1200]
-        labels = labels.reshape(-1).long()
+        # Create a one-hot tensor matching the shapes
+        target_one_hot = F.one_hot(torch.clamp(labels, min=0, max=num_classes-1), num_classes=num_classes).float()
         
-        # Ensure label weights match the same flattened sequence length
-        if label_weights is not None:
-            label_weights = label_weights.reshape(-1)
+        # If the background label matches your self.num_classes (index 10 or last index),
+        # set its row to all zeros so Focal Loss treats it purely as background noise
+        bg_mask = (labels == self.num_classes)
+        target_one_hot[bg_mask] = 0.0
+        
+        # Use target_one_hot for the loss calculation
+        labels_input = target_one_hot
         # construct weighted avg_factor to match with the official DETR repo
         cls_avg_factor = num_total_pos * 1.0 + \
             num_total_neg * self.bg_cls_weight
@@ -1403,7 +1412,8 @@ class VADHead(DETRHead):
                 cls_scores.new_tensor([cls_avg_factor]))
 
         cls_avg_factor = max(cls_avg_factor, 1)
-        loss_cls = self.loss_cls(cls_scores, labels, label_weights, avg_factor=cls_avg_factor)
+        # loss_cls = self.loss_cls(cls_scores, labels, label_weights, avg_factor=cls_avg_factor)
+        loss_cls = self.loss_cls(cls_scores, labels_input, label_weights, avg_factor=cls_avg_factor)
 
         # Compute the average number of gt boxes accross all gpus, for
         # normalization purposes
@@ -1445,6 +1455,19 @@ class VADHead(DETRHead):
         # traj classification loss
         traj_cls_scores = traj_cls_preds.reshape(-1, self.fut_mode)
         # construct weighted avg_factor to match with the official DETR repo
+        traj_labels = traj_labels.reshape(-1).long()  # Shape: [1200]
+        num_traj_modes = self.fut_mode
+        
+        # Convert 1D integer mode targets into a 2D One-Hot target matrix [1200, 6]
+        traj_target_one_hot = F.one_hot(torch.clamp(traj_labels, min=0, max=num_traj_modes-1), num_classes=num_traj_modes).float()
+        
+        # If an anchor is a negative sample/background, its index is set to self.fut_mode (index 6).
+        # We zero out those rows so Focal Loss evaluates them as pure background noise.
+        traj_bg_mask = (traj_labels == self.fut_mode)
+        traj_target_one_hot[traj_bg_mask] = 0.0
+        
+        traj_labels_input = traj_target_one_hot
+
         traj_cls_avg_factor = num_total_pos * 1.0 + \
             num_total_neg * self.traj_bg_cls_weight
         if self.sync_cls_avg_factor:
@@ -1453,7 +1476,7 @@ class VADHead(DETRHead):
 
         traj_cls_avg_factor = max(traj_cls_avg_factor, 1)
         loss_traj_cls = self.loss_traj_cls(
-            traj_cls_scores, traj_labels, label_weights, avg_factor=traj_cls_avg_factor
+            traj_cls_scores, traj_labels_input, label_weights, avg_factor=traj_cls_avg_factor
         )
 
         if digit_version(TORCH_VERSION) >= digit_version('1.8'):
@@ -1575,9 +1598,14 @@ class VADHead(DETRHead):
 
         # classification loss
         cls_scores = cls_scores.reshape(-1, self.map_cls_out_channels)
-        labels = labels.reshape(-1).long()
-        if label_weights is not None:
-            label_weights = label_weights.reshape(-1)
+        map_labels = labels.reshape(-1).long()
+        num_map_classes = self.map_cls_out_channels
+        
+        map_target_one_hot = F.one_hot(torch.clamp(map_labels, min=0, max=num_map_classes-1), num_classes=num_map_classes).float()
+        map_bg_mask = (map_labels == self.map_num_classes)
+        map_target_one_hot[map_bg_mask] = 0.0
+        
+        map_labels_input = map_target_one_hot
         # construct weighted avg_factor to match with the official DETR repo
         cls_avg_factor = num_total_pos * 1.0 + \
             num_total_neg * self.map_bg_cls_weight
@@ -1587,7 +1615,7 @@ class VADHead(DETRHead):
 
         cls_avg_factor = max(cls_avg_factor, 1)
         loss_cls = self.loss_map_cls(
-            cls_scores, labels, label_weights, avg_factor=cls_avg_factor)
+            cls_scores, map_labels_input, label_weights, avg_factor=cls_avg_factor)
 
         # Compute the average number of gt boxes accross all gpus, for
         # normalization purposes
@@ -1736,32 +1764,72 @@ class VADHead(DETRHead):
         
 
         num_dec_layers = len(map_all_cls_scores)
-        device = map_gt_labels_list[0].device
+        
+        # Safely determine the execution device even if the map batch is empty
+        if map_gt_labels_list and map_gt_labels_list[0] is not None:
+            device = map_gt_labels_list[0].device
+        else:
+            # Fallback to the active GPU hardware device running the forward pass
+            device = map_all_cls_scores.device
 
         map_gt_bboxes_list = [
-            map_gt_bboxes.bbox.to(device) for map_gt_bboxes in map_gt_vecs_list]
+            map_gt_bboxes.bbox.to(device) 
+            for map_gt_bboxes in map_gt_vecs_list 
+            if map_gt_bboxes is not None
+        ]
+        
         map_gt_pts_list = [
-            map_gt_bboxes.fixed_num_sampled_points.to(device) for map_gt_bboxes in map_gt_vecs_list]
+            map_gt_bboxes.fixed_num_sampled_points.to(device) 
+            for map_gt_bboxes in map_gt_vecs_list 
+            if map_gt_bboxes is not None
+        ]
+        
         if self.map_gt_shift_pts_pattern == 'v0':
             map_gt_shifts_pts_list = [
-                gt_bboxes.shift_fixed_num_sampled_points.to(device) for gt_bboxes in map_gt_vecs_list]
+                gt_bboxes.shift_fixed_num_sampled_points.to(device) 
+                for gt_bboxes in map_gt_vecs_list 
+                if gt_bboxes is not None
+            ]
         elif self.map_gt_shift_pts_pattern == 'v1':
             map_gt_shifts_pts_list = [
-                gt_bboxes.shift_fixed_num_sampled_points_v1.to(device) for gt_bboxes in map_gt_vecs_list]
+                gt_bboxes.shift_fixed_num_sampled_points_v1.to(device) 
+                for gt_bboxes in map_gt_vecs_list 
+                if gt_bboxes is not None
+            ]
         elif self.map_gt_shift_pts_pattern == 'v2':
             map_gt_shifts_pts_list = [
-                gt_bboxes.shift_fixed_num_sampled_points_v2.to(device) for gt_bboxes in map_gt_vecs_list]
+                gt_bboxes.shift_fixed_num_sampled_points_v2.to(device) 
+                for gt_bboxes in map_gt_vecs_list 
+                if gt_bboxes is not None
+            ]
         elif self.map_gt_shift_pts_pattern == 'v3':
             map_gt_shifts_pts_list = [
-                gt_bboxes.shift_fixed_num_sampled_points_v3.to(device) for gt_bboxes in map_gt_vecs_list]
+                gt_bboxes.shift_fixed_num_sampled_points_v3.to(device) 
+                for gt_bboxes in map_gt_vecs_list 
+                if gt_bboxes is not None
+            ]
         elif self.map_gt_shift_pts_pattern == 'v4':
             map_gt_shifts_pts_list = [
-                gt_bboxes.shift_fixed_num_sampled_points_v4.to(device) for gt_bboxes in map_gt_vecs_list]
+                gt_bboxes.shift_fixed_num_sampled_points_v4.to(device) 
+                for gt_bboxes in map_gt_vecs_list 
+                if gt_bboxes is not None
+            ]
         else:
             raise NotImplementedError
+        
+        if len(map_gt_bboxes_list) == 0 or map_gt_labels_list is None or map_gt_labels_list[0] is None:
+            map_gt_bboxes_list = [torch.zeros((0, 4), device=device)]
+            map_gt_labels_list = [torch.zeros((0,), dtype=torch.long, device=device)]
+            map_gt_shifts_pts_list = [torch.zeros((0, self.map_num_pts_per_vec, 2), device=device)]
+        else:
+            # If map_gt_labels_list is a list of lists or contains None elements, flatten it safely
+            map_gt_labels_list = [
+                lbl.to(device) if isinstance(lbl, torch.Tensor) else torch.tensor(lbl, dtype=torch.long, device=device)
+                for lbl in map_gt_labels_list if lbl is not None
+            ]
+
         map_all_gt_bboxes_list = [map_gt_bboxes_list for _ in range(num_dec_layers)]
         map_all_gt_labels_list = [map_gt_labels_list for _ in range(num_dec_layers)]
-        map_all_gt_pts_list = [map_gt_pts_list for _ in range(num_dec_layers)]
         map_all_gt_shifts_pts_list = [map_gt_shifts_pts_list for _ in range(num_dec_layers)]
         map_all_gt_bboxes_ignore_list = [
             map_gt_bboxes_ignore for _ in range(num_dec_layers)
