@@ -1043,7 +1043,25 @@ class VADHead(DETRHead):
         # trajs targets
         traj_targets = torch.zeros((num_bboxes, gt_traj_c), dtype=torch.float32, device=bbox_pred.device)
         traj_weights = torch.zeros_like(traj_targets)
-        traj_targets[pos_inds] = gt_fut_trajs[sampling_result.pos_assigned_gt_inds]
+        
+        # ======================================================================
+        # 🔥 NUMPY TO PYTORCH CUDA CONVERSION PATCH
+        # ======================================================================
+        # The logs show that gt_fut_trajs and gt_fut_masks arrive as raw NumPy 
+        # arrays. We must forcefully cast them to tensors matching our GPU device.
+        target_device = bbox_pred.device
+        
+        if isinstance(gt_fut_trajs, np.ndarray):
+            gt_fut_trajs = torch.from_numpy(gt_fut_trajs).to(target_device)
+            
+        if isinstance(gt_fut_masks, np.ndarray):
+            gt_fut_masks = torch.from_numpy(gt_fut_masks).to(target_device)
+            
+        # Safely align our matching indices onto the same GPU device
+        pos_idx_device = sampling_result.pos_assigned_gt_inds.to(target_device)
+        # ======================================================================
+        
+        traj_targets[pos_inds] = gt_fut_trajs[pos_idx_device]
         traj_weights[pos_inds] = 1.0
 
         # Filter out invalid fut trajs
@@ -1369,7 +1387,14 @@ class VADHead(DETRHead):
         gt_fut_masks = torch.cat(gt_fut_masks_list, 0)
 
         # classification loss
-        cls_scores = cls_scores.reshape(-1, self.cls_out_channels)
+        cls_scores = cls_scores.reshape(-1, self.cls_out_channels)  # [1200, 10]
+        
+        # Force the labels array into a matching 1D integer sequence [1200]
+        labels = labels.reshape(-1).long()
+        
+        # Ensure label weights match the same flattened sequence length
+        if label_weights is not None:
+            label_weights = label_weights.reshape(-1)
         # construct weighted avg_factor to match with the official DETR repo
         cls_avg_factor = num_total_pos * 1.0 + \
             num_total_neg * self.bg_cls_weight
@@ -1550,6 +1575,9 @@ class VADHead(DETRHead):
 
         # classification loss
         cls_scores = cls_scores.reshape(-1, self.map_cls_out_channels)
+        labels = labels.reshape(-1).long()
+        if label_weights is not None:
+            label_weights = label_weights.reshape(-1)
         # construct weighted avg_factor to match with the official DETR repo
         cls_avg_factor = num_total_pos * 1.0 + \
             num_total_neg * self.map_bg_cls_weight
