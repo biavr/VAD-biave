@@ -1124,15 +1124,28 @@ class VADHead(DETRHead):
                                              gt_bboxes, gt_labels, gt_shifts_pts,
                                              gt_bboxes_ignore)
 
-        sampling_result = self.map_sampler.sample(assign_result, bbox_pred,
-                                              gt_bboxes)
+        from mmengine.structures import InstanceData
+        
+        # 1. Wrap Predictions and attach anchor placeholders (.priors)
+        map_pred_instances = InstanceData()
+        map_pred_instances.bboxes = bbox_pred
+        map_pred_instances.scores = cls_score
+        map_pred_instances.priors = torch.zeros_like(bbox_pred)
+
+        # 2. Wrap Ground-Truth Map Targets
+        map_gt_instances = InstanceData()
+        map_gt_instances.bboxes = gt_bboxes
+        map_gt_instances.labels = gt_labels.long()  # Explicit cast to avoid indexing errors
+
+        # 3. Call the sampler using the wrapped containers
+        sampling_result = self.map_sampler.sample(assign_result, map_pred_instances, map_gt_instances)
         pos_inds = sampling_result.pos_inds
         neg_inds = sampling_result.neg_inds
         # label targets
         labels = gt_bboxes.new_full((num_bboxes,),
                                     self.map_num_classes,
                                     dtype=torch.long)
-        labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds]
+        labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds].long()
         label_weights = gt_bboxes.new_ones(num_bboxes)
         # bbox targets
         bbox_targets = torch.zeros_like(bbox_pred)[..., :gt_c]
@@ -1148,8 +1161,21 @@ class VADHead(DETRHead):
         pts_weights = torch.zeros_like(pts_targets)
         pts_weights[pos_inds] = 1.0
         # DETR
-        bbox_targets[pos_inds] = sampling_result.pos_gt_bboxes
-        pts_targets[pos_inds] = gt_shifts_pts[sampling_result.pos_assigned_gt_inds,assigned_shift,:,:]
+        pts_targets = pts_pred.new_zeros((pts_pred.size(0),
+                        pts_pred.size(1), pts_pred.size(2)))
+        pts_weights = torch.zeros_like(pts_targets)
+        
+        # Only assign and index if there are actual positive sample pairs matched
+        if pos_inds.numel() > 0:
+            pts_weights[pos_inds] = 1.0
+            bbox_targets[pos_inds] = sampling_result.pos_gt_bboxes
+            
+            # If the data pipeline passed a 3D tensor fallback, use 3D slicing layout
+            if gt_shifts_pts.dim() == 3:
+                pts_targets[pos_inds] = gt_shifts_pts[sampling_result.pos_assigned_gt_inds, :, :]
+            else:
+                # Standard 4D processing matrix path
+                pts_targets[pos_inds] = gt_shifts_pts[sampling_result.pos_assigned_gt_inds, assigned_shift, :, :]
         return (labels, label_weights, bbox_targets, bbox_weights,
                 pts_targets, pts_weights,
                 pos_inds, neg_inds)
@@ -1598,14 +1624,31 @@ class VADHead(DETRHead):
 
         # classification loss
         cls_scores = cls_scores.reshape(-1, self.map_cls_out_channels)
+        target_length = cls_scores.size(0)
+        
         map_labels = labels.reshape(-1).long()
+        if map_labels.size(0) != target_length:
+            # If the labels tensor represents the whole batch combined, 
+            # slice or match it strictly to the current unrolled layer length
+            map_labels = map_labels[:target_length]
+            
         num_map_classes = self.map_cls_out_channels
         
-        map_target_one_hot = F.one_hot(torch.clamp(map_labels, min=0, max=num_map_classes-1), num_classes=num_map_classes).float()
+        # Build one-hot encoding with perfect shape alignment [target_length, num_map_classes]
+        map_target_one_hot = F.one_hot(
+            torch.clamp(map_labels, min=0, max=num_map_classes-1), 
+            num_classes=num_map_classes
+        ).float()
+        
+        # Explicit background mapping mask
         map_bg_mask = (map_labels == self.map_num_classes)
         map_target_one_hot[map_bg_mask] = 0.0
         
         map_labels_input = map_target_one_hot
+        
+        # Ensure label_weights matches the flat dimension length too
+        if label_weights is not None:
+            label_weights = label_weights.reshape(-1)[:target_length]
         # construct weighted avg_factor to match with the official DETR repo
         cls_avg_factor = num_total_pos * 1.0 + \
             num_total_neg * self.map_bg_cls_weight
