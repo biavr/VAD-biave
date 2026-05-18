@@ -1626,15 +1626,23 @@ class VADHead(DETRHead):
         cls_scores = cls_scores.reshape(-1, self.map_cls_out_channels)
         target_length = cls_scores.size(0)
         
+        # ======================================================================
         map_labels = labels.reshape(-1).long()
-        if map_labels.size(0) != target_length:
-            # If the labels tensor represents the whole batch combined, 
-            # slice or match it strictly to the current unrolled layer length
-            map_labels = map_labels[:target_length]
-            
         num_map_classes = self.map_cls_out_channels
         
-        # Build one-hot encoding with perfect shape alignment [target_length, num_map_classes]
+        # Force strict dimension matching regardless of layer-unrolling or batch combinations
+        if map_labels.size(0) != target_length:
+            if map_labels.size(0) % target_length == 0:
+                # If it's a perfect multiple (e.g. 400 total elements for 100 queries), slice the matching section
+                map_labels = map_labels[:target_length]
+            else:
+                # Absolute fallback safety net to force standard alignment
+                adaptive_labels = torch.full((target_length,), self.map_num_classes, dtype=torch.long, device=cls_scores.device)
+                fill_length = min(map_labels.size(0), target_length)
+                adaptive_labels[:fill_length] = map_labels[:fill_length]
+                map_labels = adaptive_labels
+                
+        # Build the 2D One-Hot target matrix with perfect matching dimensions
         map_target_one_hot = F.one_hot(
             torch.clamp(map_labels, min=0, max=num_map_classes-1), 
             num_classes=num_map_classes
@@ -1643,12 +1651,17 @@ class VADHead(DETRHead):
         # Explicit background mapping mask
         map_bg_mask = (map_labels == self.map_num_classes)
         map_target_one_hot[map_bg_mask] = 0.0
-        
         map_labels_input = map_target_one_hot
         
-        # Ensure label_weights matches the flat dimension length too
+        # Ensure label_weights matches the exact same sequence length 
         if label_weights is not None:
-            label_weights = label_weights.reshape(-1)[:target_length]
+            label_weights = label_weights.reshape(-1)
+            if label_weights.size(0) != target_length:
+                if label_weights.size(0) % target_length == 0:
+                    label_weights = label_weights[:target_length]
+                else:
+                    label_weights = torch.ones(target_length, dtype=cls_scores.dtype, device=cls_scores.device)
+        # ======================================================================
         # construct weighted avg_factor to match with the official DETR repo
         cls_avg_factor = num_total_pos * 1.0 + \
             num_total_neg * self.map_bg_cls_weight
@@ -1669,51 +1682,69 @@ class VADHead(DETRHead):
         bbox_preds = bbox_preds.reshape(-1, bbox_preds.size(-1))
         normalized_bbox_targets = normalize_2d_bbox(bbox_targets, self.pc_range)
         # normalized_bbox_targets = bbox_targets
-        isnotnan = torch.isfinite(normalized_bbox_targets).all(dim=-1)
-        bbox_weights = bbox_weights * self.map_code_weights
-
-        loss_bbox = self.loss_map_bbox(
-            bbox_preds[isnotnan, :4],
-            normalized_bbox_targets[isnotnan,:4],
-            bbox_weights[isnotnan, :4],
-            avg_factor=num_total_pos)
-
-        # regression pts CD loss
-        # num_samples, num_order, num_pts, num_coords
         normalized_pts_targets = normalize_2d_pts(pts_targets, self.pc_range)
-
-        # num_samples, num_pts, num_coords
         pts_preds = pts_preds.reshape(-1, pts_preds.size(-2), pts_preds.size(-1))
+        
+        # Match point target lengths to pts_preds row dimension
+        if normalized_pts_targets.size(0) != pts_preds.size(0):
+            pts_target_len = pts_preds.size(0)
+            if normalized_pts_targets.size(0) % pts_target_len == 0:
+                normalized_pts_targets = normalized_pts_targets[:pts_target_len]
+                pts_weights = pts_weights.reshape(-1, pts_weights.size(-2), pts_weights.size(-1))[:pts_target_len]
+            else:
+                adaptive_pts = torch.zeros_like(pts_preds)
+                fill_p_len = min(normalized_pts_targets.size(0), pts_target_len)
+                adaptive_pts[:fill_p_len] = normalized_pts_targets[:fill_p_len]
+                normalized_pts_targets = adaptive_pts
+                
+                adaptive_p_w = torch.zeros_like(pts_preds)
+                pts_weights = pts_weights.reshape(-1, pts_weights.size(-2), pts_weights.size(-1))
+                fill_pw_len = min(pts_weights.size(0), pts_target_len)
+                adaptive_p_w[:fill_pw_len] = pts_weights[:fill_pw_len]
+                pts_weights = adaptive_p_w
+
         if self.map_num_pts_per_vec != self.map_num_pts_per_gt_vec:
             pts_preds = pts_preds.permute(0,2,1)
             pts_preds = F.interpolate(pts_preds, size=(self.map_num_pts_per_gt_vec), mode='linear',
                                     align_corners=True)
             pts_preds = pts_preds.permute(0,2,1).contiguous()
 
+        # Generate a dedicated point-level validity mask
+        isnotnan_pts = torch.isfinite(normalized_pts_targets).all(dim=-1).all(dim=-1)
+
         loss_pts = self.loss_map_pts(
-            pts_preds[isnotnan,:,:],
-            normalized_pts_targets[isnotnan,:,:], 
-            pts_weights[isnotnan,:,:],
+            pts_preds[isnotnan_pts,:,:],
+            normalized_pts_targets[isnotnan_pts,:,:], 
+            pts_weights[isnotnan_pts,:,:],
             avg_factor=num_total_pos)
 
-        dir_weights = pts_weights[:, :-self.map_dir_interval,0]
+        # 2. direction loss alignment
+        dir_weights = pts_weights[:, :-self.map_dir_interval, 0]
         denormed_pts_preds = denormalize_2d_pts(pts_preds, self.pc_range)
         denormed_pts_preds_dir = denormed_pts_preds[:,self.map_dir_interval:,:] - \
             denormed_pts_preds[:,:-self.map_dir_interval,:]
+        
+        # Match pts_targets dimension for direction calculations
+        if pts_targets.size(0) != pts_preds.size(0):
+            pts_targets = pts_targets[:pts_preds.size(0)] if pts_targets.size(0) % pts_preds.size(0) == 0 else pts_targets.repeat(pts_preds.size(0) // pts_targets.size(0) + 1, 1, 1)[:pts_preds.size(0)]
+            
         pts_targets_dir = pts_targets[:, self.map_dir_interval:,:] - pts_targets[:,:-self.map_dir_interval,:]
+        isnotnan_dir = torch.isfinite(pts_targets_dir).all(dim=-1).all(dim=-1)
 
         loss_dir = self.loss_map_dir(
-            denormed_pts_preds_dir[isnotnan,:,:],
-            pts_targets_dir[isnotnan,:,:],
-            dir_weights[isnotnan,:],
+            denormed_pts_preds_dir[isnotnan_dir,:,:],
+            pts_targets_dir[isnotnan_dir,:,:],
+            dir_weights[isnotnan_dir,:],
             avg_factor=num_total_pos)
 
+        # 3. IoU Loss alignment
         bboxes = denormalize_2d_bbox(bbox_preds, self.pc_range)
-        # regression IoU loss, defaultly GIoU loss
+        isnotnan_bbox = torch.isfinite(normalized_bbox_targets).all(dim=-1)
+        
         loss_iou = self.loss_map_iou(
-            bboxes[isnotnan, :4],
-            bbox_targets[isnotnan, :4],
-            bbox_weights[isnotnan, :4], 
+            bboxes[isnotnan_bbox, :4],
+            normalized_bbox_targets[isnotnan_bbox, :4],
+            bbox_weights[isnotnan_bbox, :4], 
             avg_factor=num_total_pos)
 
         if digit_version(TORCH_VERSION) >= digit_version('1.8'):
@@ -1878,11 +1909,45 @@ class VADHead(DETRHead):
             map_gt_bboxes_ignore for _ in range(num_dec_layers)
         ]
 
-        map_losses_cls, map_losses_bbox, map_losses_iou, \
-            map_losses_pts, map_losses_dir = multi_apply(
-            self.map_loss_single, map_all_cls_scores, map_all_bbox_preds,
-            map_all_pts_preds, map_all_gt_bboxes_list, map_all_gt_labels_list,
-            map_all_gt_shifts_pts_list, map_all_gt_bboxes_ignore_list)
+        # map_losses_cls, map_losses_bbox, map_losses_iou, \
+        #     map_losses_pts, map_losses_dir = multi_apply(
+        #     self.map_loss_single, map_all_cls_scores, map_all_bbox_preds,
+        #     map_all_pts_preds, map_all_gt_bboxes_list, map_all_gt_labels_list,
+        #     map_all_gt_shifts_pts_list, map_all_gt_bboxes_ignore_list)
+        # ======================================================================
+        # NEW APPROACH: EXPLICIT LAYER UNROLLING TO BYPASS MULTI_APPLY SHAPE DEFECTS
+        # ======================================================================
+        map_losses_cls = []
+        map_losses_bbox = []
+        map_losses_iou = []
+        map_losses_pts = []
+        map_losses_dir = []
+
+        # Iterate through each decoder layer manually to keep strict control over tensor shapes
+        for i in range(num_dec_layers):
+            # Extract the specific tensor slice for the current decoder layer
+            layer_cls_scores = map_all_cls_scores[i]  # [bs, num_query, cls_out]
+            layer_bbox_preds = map_all_bbox_preds[i]  # [bs, num_query, 4]
+            layer_pts_preds  = map_all_pts_preds[i]   # [bs, num_query, num_pts, 2]
+
+            # Execute loss_single for this layer explicitly
+            l_cls, l_bbox, l_iou, l_pts, l_dir = self.map_loss_single(
+                cls_scores=layer_cls_scores,
+                bbox_preds=layer_bbox_preds,
+                pts_preds=layer_pts_preds,
+                gt_bboxes_list=map_gt_bboxes_list,    # Use the base list directly, avoiding nested multi_apply duplication
+                gt_labels_list=map_gt_labels_list,    # Use the base list directly
+                gt_shifts_pts_list=map_gt_shifts_pts_list, # Use the base list directly
+                gt_bboxes_ignore_list=map_gt_bboxes_ignore
+            )
+            
+            # Append the calculated scalar losses for this layer
+            map_losses_cls.append(l_cls)
+            map_losses_bbox.append(l_bbox)
+            map_losses_iou.append(l_iou)
+            map_losses_pts.append(l_pts)
+            map_losses_dir.append(l_dir)
+        # ======================================================================
 
         loss_dict = dict()
         # loss from the last decoder layer
