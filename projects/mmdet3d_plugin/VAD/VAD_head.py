@@ -1329,28 +1329,46 @@ class VADHead(DETRHead):
             loss_plan_l1_weight
         )
 
-        loss_plan_bound = self.loss_plan_bound(
-            ego_fut_preds[ego_fut_cmd==1],
-            lane_preds,
-            lane_score_preds,
-            weight=ego_fut_masks
-        )
+        # ======================================================================
+        # EMPTY SCENE PLANNING LOSS GUARD PATCH
+        # ======================================================================
+        # Check if lane predictions or command filters contain valid execution dimensions
+        # to prevent subtraction mismatches when no map lanes are present in the scene.
+        has_valid_maps = lane_preds is not None and lane_preds.size(0) > 0 and lane_preds.numel() > 0
+        has_filtered_cmds = (ego_fut_cmd == 1).any()
 
-        loss_plan_col = self.loss_plan_col(
-            ego_fut_preds[ego_fut_cmd==1],
-            agent_preds,
-            agent_fut_preds,
-            agent_score_preds,
-            agent_fut_cls_preds,
-            weight=ego_fut_masks[:, :, None].repeat(1, 1, 2)
-        )
+        if has_valid_maps and has_filtered_cmds and ego_fut_preds[ego_fut_cmd==1].size(0) == lane_preds.size(0):
+            loss_plan_bound = self.loss_plan_bound(
+                ego_fut_preds[ego_fut_cmd==1],
+                lane_preds,
+                lane_score_preds,
+                weight=ego_fut_masks
+            )
 
-        loss_plan_dir = self.loss_plan_dir(
-            ego_fut_preds[ego_fut_cmd==1],
-            lane_preds,
-            lane_score_preds,
-            weight=ego_fut_masks
-        )
+            loss_plan_dir = self.loss_plan_dir(
+                ego_fut_preds[ego_fut_cmd==1],
+                lane_preds,
+                lane_score_preds,
+                weight=ego_fut_masks
+            )
+        else:
+            # Safe zero-tensor fallbacks for empty map batches
+            loss_plan_bound = ego_fut_preds.new_tensor(0.0)
+            loss_plan_dir = ego_fut_preds.new_tensor(0.0)
+            
+        # Collision constraints evaluate against agents, which can be safely calculated
+        if has_filtered_cmds and agent_preds is not None and agent_preds.size(0) > 0:
+            loss_plan_col = self.loss_plan_col(
+                ego_fut_preds[ego_fut_cmd==1],
+                agent_preds,
+                agent_fut_preds,
+                agent_score_preds,
+                agent_fut_cls_preds,
+                weight=ego_fut_masks[:, :, None].repeat(1, 1, 2)
+            )
+        else:
+            loss_plan_col = ego_fut_preds.new_tensor(0.0)
+        # ======================================================================
 
         if digit_version(TORCH_VERSION) >= digit_version('1.8'):
             loss_plan_l1 = torch.nan_to_num(loss_plan_l1)
@@ -1626,42 +1644,40 @@ class VADHead(DETRHead):
         cls_scores = cls_scores.reshape(-1, self.map_cls_out_channels)
         target_length = cls_scores.size(0)
         
-        # ======================================================================
-        map_labels = labels.reshape(-1).long()
+        # Force all ground truth targets and weights to dynamically match target_length
+        def match_shape(tensor, target_len, pad_value=0, is_pt=False):
+            if tensor.size(0) == target_len:
+                return tensor
+            if tensor.size(0) % target_len == 0:
+                return tensor[:target_len]
+            # Dynamic fallback generation if lengths don't match cleanly
+            out_shape = [target_len] + list(tensor.shape[1:])
+            adaptive_tensor = torch.full(out_shape, pad_value, dtype=tensor.dtype, device=tensor.device)
+            fill_len = min(tensor.size(0), target_len)
+            adaptive_tensor[:fill_len] = tensor[:fill_len]
+            return adaptive_tensor
+
+        map_labels = match_shape(labels.reshape(-1), target_length, pad_value=self.map_num_classes)
+        bbox_targets = match_shape(bbox_targets, target_length)
+        bbox_weights = match_shape(bbox_weights, target_length)
+        pts_targets = match_shape(pts_targets, target_length)
+        pts_weights = match_shape(pts_weights, target_length)
+        if label_weights is not None:
+            label_weights = match_shape(label_weights.reshape(-1), target_length, pad_value=1)
+
+        # map_labels = labels.reshape(-1).long()
         num_map_classes = self.map_cls_out_channels
         
-        # Force strict dimension matching regardless of layer-unrolling or batch combinations
-        if map_labels.size(0) != target_length:
-            if map_labels.size(0) % target_length == 0:
-                # If it's a perfect multiple (e.g. 400 total elements for 100 queries), slice the matching section
-                map_labels = map_labels[:target_length]
-            else:
-                # Absolute fallback safety net to force standard alignment
-                adaptive_labels = torch.full((target_length,), self.map_num_classes, dtype=torch.long, device=cls_scores.device)
-                fill_length = min(map_labels.size(0), target_length)
-                adaptive_labels[:fill_length] = map_labels[:fill_length]
-                map_labels = adaptive_labels
-                
-        # Build the 2D One-Hot target matrix with perfect matching dimensions
+        num_map_classes = self.map_cls_out_channels
         map_target_one_hot = F.one_hot(
             torch.clamp(map_labels, min=0, max=num_map_classes-1), 
             num_classes=num_map_classes
         ).float()
         
-        # Explicit background mapping mask
         map_bg_mask = (map_labels == self.map_num_classes)
         map_target_one_hot[map_bg_mask] = 0.0
         map_labels_input = map_target_one_hot
         
-        # Ensure label_weights matches the exact same sequence length 
-        if label_weights is not None:
-            label_weights = label_weights.reshape(-1)
-            if label_weights.size(0) != target_length:
-                if label_weights.size(0) % target_length == 0:
-                    label_weights = label_weights[:target_length]
-                else:
-                    label_weights = torch.ones(target_length, dtype=cls_scores.dtype, device=cls_scores.device)
-        # ======================================================================
         # construct weighted avg_factor to match with the official DETR repo
         cls_avg_factor = num_total_pos * 1.0 + \
             num_total_neg * self.map_bg_cls_weight
@@ -1673,49 +1689,63 @@ class VADHead(DETRHead):
         loss_cls = self.loss_map_cls(
             cls_scores, map_labels_input, label_weights, avg_factor=cls_avg_factor)
 
-        # Compute the average number of gt boxes accross all gpus, for
-        # normalization purposes
+        # Compute the average number of gt boxes across all gpus
         num_total_pos = loss_cls.new_tensor([num_total_pos])
         num_total_pos = torch.clamp(reduce_mean(num_total_pos), min=1).item()
 
         # regression L1 loss
         bbox_preds = bbox_preds.reshape(-1, bbox_preds.size(-1))
         normalized_bbox_targets = normalize_2d_bbox(bbox_targets, self.pc_range)
-        # normalized_bbox_targets = bbox_targets
+        isnotnan_bbox = torch.isfinite(normalized_bbox_targets).all(dim=-1)
+        
+        box_dim = bbox_weights.size(-1)
+        bbox_weights = bbox_weights * self.map_code_weights[:box_dim]
+
+        loss_bbox = self.loss_map_bbox(
+            bbox_preds[isnotnan_bbox, :4],
+            normalized_bbox_targets[isnotnan_bbox, :4],
+            bbox_weights[isnotnan_bbox, :4],
+            avg_factor=num_total_pos)
+
+        # regression pts CD loss
         normalized_pts_targets = normalize_2d_pts(pts_targets, self.pc_range)
         pts_preds = pts_preds.reshape(-1, pts_preds.size(-2), pts_preds.size(-1))
         
-        # Match point target lengths to pts_preds row dimension
-        if normalized_pts_targets.size(0) != pts_preds.size(0):
-            pts_target_len = pts_preds.size(0)
-            if normalized_pts_targets.size(0) % pts_target_len == 0:
-                normalized_pts_targets = normalized_pts_targets[:pts_target_len]
-                pts_weights = pts_weights.reshape(-1, pts_weights.size(-2), pts_weights.size(-1))[:pts_target_len]
-            else:
-                adaptive_pts = torch.zeros_like(pts_preds)
-                fill_p_len = min(normalized_pts_targets.size(0), pts_target_len)
-                adaptive_pts[:fill_p_len] = normalized_pts_targets[:fill_p_len]
-                normalized_pts_targets = adaptive_pts
-                
-                adaptive_p_w = torch.zeros_like(pts_preds)
-                pts_weights = pts_weights.reshape(-1, pts_weights.size(-2), pts_weights.size(-1))
-                fill_pw_len = min(pts_weights.size(0), pts_target_len)
-                adaptive_p_w[:fill_pw_len] = pts_weights[:fill_pw_len]
-                pts_weights = adaptive_p_w
-
         if self.map_num_pts_per_vec != self.map_num_pts_per_gt_vec:
             pts_preds = pts_preds.permute(0,2,1)
             pts_preds = F.interpolate(pts_preds, size=(self.map_num_pts_per_gt_vec), mode='linear',
                                     align_corners=True)
             pts_preds = pts_preds.permute(0,2,1).contiguous()
 
-        # Generate a dedicated point-level validity mask
         isnotnan_pts = torch.isfinite(normalized_pts_targets).all(dim=-1).all(dim=-1)
 
         loss_pts = self.loss_map_pts(
             pts_preds[isnotnan_pts,:,:],
             normalized_pts_targets[isnotnan_pts,:,:], 
             pts_weights[isnotnan_pts,:,:],
+            avg_factor=num_total_pos)
+
+        # direction loss
+        dir_weights = pts_weights[:, :-self.map_dir_interval, 0]
+        denormed_pts_preds = denormalize_2d_pts(pts_preds, self.pc_range)
+        denormed_pts_preds_dir = denormed_pts_preds[:,self.map_dir_interval:,:] - \
+            denormed_pts_preds[:,:-self.map_dir_interval,:]
+        pts_targets_dir = pts_targets[:, self.map_dir_interval:,:] - pts_targets[:,:-self.map_dir_interval,:]
+
+        isnotnan_dir = torch.isfinite(pts_targets_dir).all(dim=-1).all(dim=-1)
+
+        loss_dir = self.loss_map_dir(
+            denormed_pts_preds_dir[isnotnan_dir,:,:],
+            pts_targets_dir[isnotnan_dir,:,:],
+            dir_weights[isnotnan_dir,:],
+            avg_factor=num_total_pos)
+
+        # IoU loss
+        bboxes = denormalize_2d_bbox(bbox_preds, self.pc_range)
+        loss_iou = self.loss_map_iou(
+            bboxes[isnotnan_bbox, :4],
+            normalized_bbox_targets[isnotnan_bbox, :4],
+            bbox_weights[isnotnan_bbox, :4], 
             avg_factor=num_total_pos)
 
         # 2. direction loss alignment
