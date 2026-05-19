@@ -38,8 +38,8 @@ _num_levels_ = 1
 bev_h_ = 100
 bev_w_ = 100
 queue_length = 3
-# total_epochs = 60
-total_epochs = 2
+total_epochs = 15
+# total_epochs = 2
 data_root = '/workspace/datasets/nuscenes/nuscenes/'
   
 # --- Model Configuration ---
@@ -361,7 +361,7 @@ test_dataloader = val_dataloader
 # --- Optimization ---
 optim_wrapper = dict(
     type='OptimWrapper',
-    optimizer=dict(type='AdamW', lr=2e-4, weight_decay=0.01),
+    optimizer=dict(type='AdamW', lr=5e-4, weight_decay=0.01),
     paramwise_cfg=dict(custom_keys={'img_backbone': dict(lr_mult=0.1)}),
     clip_grad=dict(max_norm=35, norm_type=2))
 

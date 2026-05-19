@@ -206,6 +206,12 @@ class HungarianAssigner3D(BaseAssigner):
         if linear_sum_assignment is None:
             raise ImportError('Please run "pip install scipy" to install scipy first.')
             
+        if torch.isnan(cost_cpu).any() or torch.isinf(cost_cpu).any():
+            # Replace NaNs with a massive cost value so the assigner safely skips them
+            cost_cpu = torch.where(torch.isnan(cost_cpu), torch.tensor(1e5, dtype=cost_cpu.dtype), cost_cpu)
+            # Replace Infs with a massive finite cost value
+            cost_cpu = torch.where(torch.isinf(cost_cpu), torch.tensor(1e5, dtype=cost_cpu.dtype), cost_cpu)
+            
         matched_row_inds, matched_col_inds = linear_sum_assignment(cost_cpu)
         matched_row_inds = torch.from_numpy(matched_row_inds).to(bbox_pred.device)
         matched_col_inds = torch.from_numpy(matched_col_inds).to(bbox_pred.device)

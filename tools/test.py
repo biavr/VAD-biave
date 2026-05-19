@@ -13,7 +13,7 @@ import copy
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
 import warnings
-from mmcv import Config, DictAction
+from mmengine.config import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
 from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
