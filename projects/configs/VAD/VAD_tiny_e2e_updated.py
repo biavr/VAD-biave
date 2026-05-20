@@ -5,7 +5,7 @@ _base_ = [
 
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
-
+default_scope = 'mmdet3d'
 # Essential for VAD plugin registration
 custom_imports = dict(
     imports=['mmdet.models.layers.transformer',

@@ -35,7 +35,9 @@ import numpy as np
 import torch
 import cv2 as cv
 import mmcv
-from mmcv.utils import TORCH_VERSION, digit_version
+# from mmcv.utils import TORCH_VERSION, digit_version
+from mmengine.utils.dl_utils.parrots_wrapper import TORCH_VERSION
+from mmengine.utils.version_utils import digit_version
 from mmcv.utils import ext_loader
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])

@@ -49,7 +49,9 @@ def force_fp32(apply_to=None, out_fp16=False):
         return wrapper
     return decorator
 
-from mmcv.utils import TORCH_VERSION, digit_version
+# from mmcv.utils import TORCH_VERSION, digit_version
+from mmengine.utils.dl_utils.parrots_wrapper import TORCH_VERSION
+from mmengine.utils.version_utils import digit_version
 from mmdet.models.task_modules import PseudoSampler, build_assigner, build_sampler, build_bbox_coder
 from mmdet.models.layers.transformer import inverse_sigmoid
 from mmdet.structures.bbox import bbox_xyxy_to_cxcywh
