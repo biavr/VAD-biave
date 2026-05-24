@@ -227,6 +227,30 @@ class VAD(MVXTwoStageDetector):
             return self.forward_train(img=img, data_samples=data_samples, **kwargs)
         elif mode == 'predict':
             # Note: Ensure simple_test is used for prediction/inference
+            if data_samples is not None and isinstance(data_samples, list) and len(data_samples) > 0:
+                print(">>> Extracting meta information and GT from data_samples for simple_test.")
+                sample = data_samples[0]
+                metainfo = getattr(sample, 'metainfo', {})
+                img_metas = metainfo.get('img_metas', None)
+                
+                gt_instances = getattr(sample, 'gt_instances_3d', None)
+                gt_bboxes_3d = getattr(gt_instances, 'bboxes_3d', None) if gt_instances is not None else None
+                gt_labels_3d = getattr(gt_instances, 'labels_3d', None) if gt_instances is not None else None
+                
+                extra_args = {
+                    'img_metas': [img_metas] if img_metas is not None and not isinstance(img_metas, list) else img_metas,
+                    'gt_bboxes_3d': [gt_bboxes_3d] if gt_bboxes_3d is not None else None,
+                    'gt_labels_3d': [gt_labels_3d] if gt_labels_3d is not None else None,
+                    'ego_his_trajs': metainfo.get('ego_his_trajs', None),
+                    'ego_fut_trajs': metainfo.get('ego_fut_trajs', None),
+                    'ego_fut_masks': metainfo.get('ego_fut_masks', None),
+                    'ego_fut_cmd': metainfo.get('ego_fut_cmd', None),
+                    'ego_lcf_feat': metainfo.get('ego_lcf_feat', None),
+                }
+                
+                cleaned_extra = {k: v for k, v in extra_args.items() if v is not None}
+                kwargs.update(cleaned_extra)
+            print(f">>> Forwarding to simple_test with img shape: {img.shape if img is not None else 'None'} and extra args: {list(kwargs.keys())}")
             return self.simple_test(img=img, data_samples=data_samples, **kwargs)
         elif mode == 'tensor':
             return self.extract_feat(img=img)

@@ -1049,12 +1049,27 @@ class VADCustomNuScenesDataset(NuScenesDataset):
     ):
         print("\n!!! VAD DATASET INITIALIZING !!!\n") # Add this!
         # print(">>> Initializing VADCustomNuScenesDataset with custom_eval_version: ", custom_eval_version)
-        if 'metainfo' not in kwargs:
+        # if 'metainfo' not in kwargs:
+        #     print(">>> No metainfo provided, using default METAINFO.")
+        #     kwargs['metainfo'] = self.METAINFO
+        if 'classes' in kwargs:
+            classes_val = kwargs.pop('classes')
+            kwargs['metainfo'] = dict(classes=classes_val)
+        elif 'metainfo' not in kwargs:
             print(">>> No metainfo provided, using default METAINFO.")
             kwargs['metainfo'] = self.METAINFO
-        # print(">>> Dataset METAINFO: ", kwargs['metainfo'])
-            
-        super().__init__(*args, **kwargs)
+
+        # 2. Extract and sanitize properties destined for VectorizedLocalMap
+        map_data_root = kwargs.get('data_root', '')
+
+        # 3. Strip structural properties that clash with 3.x BaseDataset signatures
+        cleaned_kwargs = {k: v for k, v in kwargs.items() if k not in ['classes']}
+        # super().__init__(*args, **kwargs)
+        super().__init__(*args, **cleaned_kwargs)
+        if hasattr(self, 'data_list') and len(self.data_list) > 0:
+            self.data_infos = self.data_list
+        elif hasattr(self, 'data_infos') and len(self.data_infos) > 0:
+            self.data_list = self.data_infos
         self.queue_length = queue_length
         self.overlap_test = overlap_test
         self.bev_size = bev_size
@@ -1083,7 +1098,8 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         self.padding_value = padding_value
         self.fixed_num = map_fixed_ptsnum_per_line
         self.eval_use_same_gt_sample_num_flag = map_eval_use_same_gt_sample_num_flag
-        self.vector_map = VectorizedLocalMap(kwargs['data_root'], 
+        # self.vector_map = VectorizedLocalMap(kwargs['data_root'], 
+        self.vector_map = VectorizedLocalMap(map_data_root, 
                             patch_size=self.patch_size, map_classes=self.MAPCLASSES, 
                             fixed_ptsnum_per_line=map_fixed_ptsnum_per_line,
                             padding_value=self.padding_value)
@@ -1122,16 +1138,6 @@ class VADCustomNuScenesDataset(NuScenesDataset):
 
         return class_names
 
-    # @property
-    # def data_infos(self):
-    #     # MMEngine 1.x / 2.0 uses 'data_list' internally
-    #     if hasattr(self, 'data_list') and len(self.data_list) > 0:
-    #         return self.data_list
-    #     return []
-
-    # @data_infos.setter
-    # def data_infos(self, value):
-    #     self.data_list = value
 
     @property
     def CLASSES(self):
@@ -1244,6 +1250,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         # print("="*50 + "\n")
         """Bridge old VAD list-style pkl to new MMEngine dict-style."""
         # 1. Load the pkl file
+        print(f">>> Loading annotations from: {self.ann_file}")
         annotations = load(self.ann_file)
         
         # 2. Extract the raw data list
@@ -1390,21 +1397,76 @@ class VADCustomNuScenesDataset(NuScenesDataset):
        
         return packed_results
 
+    # def prepare_test_data(self, index):
+    #     """Prepare data for testing.
+
+    #     Args:
+    #         index (int): Index for accessing the target data.
+
+    #     Returns:
+    #         dict: Testing data dict of the corresponding index.
+    #     """
+    #     input_dict = self.get_data_info(index)
+    #     # self.pre_pipeline(input_dict)
+    #     example = self.pipeline(input_dict)
+    #     if self.is_vis_on_test:
+    #         example = self.vectormap_pipeline(example, input_dict)
+    #     return example
+
     def prepare_test_data(self, index):
-        """Prepare data for testing.
+        """Prepare data for testing."""
+        # Parallel worker tracking guard
+        if not hasattr(self, 'data_list') or len(self.data_list) == 0:
+            if hasattr(self, 'data_infos') and len(self.data_infos) > 0:
+                self.data_list = self.data_infos
+            else:
+                self.data_list = self.load_data_list()
+                self.data_infos = self.data_list
 
-        Args:
-            index (int): Index for accessing the target data.
-
-        Returns:
-            dict: Testing data dict of the corresponding index.
-        """
         input_dict = self.get_data_info(index)
-        # self.pre_pipeline(input_dict)
+        
+        # Pull custom trajectory fields out before the pipeline runs
+        planning_data = {
+            'ego_his_trajs': input_dict.get('ego_his_trajs', None),
+            'ego_fut_trajs': input_dict.get('ego_fut_trajs', None),
+            'ego_fut_masks': input_dict.get('ego_fut_masks', None),
+            'ego_fut_cmd': input_dict.get('ego_fut_cmd', None),
+            'ego_lcf_feat': input_dict.get('ego_lcf_feat', None),
+        }
+
         example = self.pipeline(input_dict)
         if self.is_vis_on_test:
             example = self.vectormap_pipeline(example, input_dict)
-        return example
+            
+        combined_img = example.pop('img', None)
+        if combined_img is not None:
+            if isinstance(combined_img, list):
+                import torch
+                import numpy as np
+                combined_img = [torch.from_numpy(c) if isinstance(c, np.ndarray) else c for c in combined_img]
+                combined_img = torch.stack(combined_img)
+            elif isinstance(combined_img, np.ndarray):
+                import torch
+                combined_img = torch.from_numpy(combined_img)
+
+        # Package data through modern 3.x standards 
+        packed_results = self.packer(example)
+        
+        # Inject custom fields into metainfo fields where the network can read them
+        for k, v in planning_data.items():
+            if v is not None:
+                import torch
+                import numpy as np
+                if isinstance(v, np.ndarray):
+                    v = torch.from_numpy(v)
+                packed_results['data_samples'].set_metainfo({k: v})
+                
+        if combined_img is not None:
+            packed_results['inputs'] = dict(img=combined_img)
+        else:
+            packed_results['inputs'] = dict()
+            
+        return packed_results
 
     def union2one(self, queue):
         """

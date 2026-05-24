@@ -260,17 +260,17 @@ model = dict(
         point_cloud_range=point_cloud_range,
         out_size_factor=4,
         assigner=dict(
-            type='HungarianAssigner3D',
+            type='mmdet.HungarianAssigner3D',
             cls_cost=dict(type='mmdet.FocalLossCost', weight=2.0),
-            reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
-            iou_cost=dict(type='IoUCost', weight=0.0),
+            reg_cost=dict(type='mmdet.BBox3DL1Cost', weight=0.25),
+            iou_cost=dict(type='mmdet.IoUCost', weight=0.0),
             pc_range=point_cloud_range),
         map_assigner=dict(
-            type='MapHungarianAssigner3D',
+            type='mmdet.MapHungarianAssigner3D',
             cls_cost=dict(type='mmdet.FocalLossCost', weight=2.0),
-            reg_cost=dict(type='BBoxL1Cost', weight=0.0, box_format='xywh'),
-            iou_cost=dict(type='IoUCost', iou_mode='giou', weight=0.0),
-            pts_cost=dict(type='OrderedPtsL1Cost', weight=1.0),
+            reg_cost=dict(type='mmdet.BBoxL1Cost', weight=0.0, box_format='xywh'),
+            iou_cost=dict(type='mmdet.IoUCost', iou_mode='giou', weight=0.0),
+            pts_cost=dict(type='mmdet.OrderedPtsL1Cost', weight=1.0),
             pc_range=point_cloud_range))),
 )
 
@@ -312,12 +312,21 @@ train_pipeline = [
     # )
 ]
 
+# test_pipeline = [
+#     dict(type='mmdet3d.LoadMultiViewImageFromFiles', to_float32=True),
+#     dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
+#     dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomDefaultFormatBundle3D', class_names=class_names, with_label=False, with_ego=True),
+#     dict(type='mmdet3d.Pack3DDetInputs', keys=['img', 'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat'])
+# ]
 test_pipeline = [
     dict(type='mmdet3d.LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
-    dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomDefaultFormatBundle3D', class_names=class_names, with_label=False, with_ego=True),
-    dict(type='PackDet3DInputs', keys=['img', 'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat'])
+    dict(
+        type='mmdet3d.Pack3DDetInputs', 
+        keys=['img']#, 'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat']
+    )
 ]
+
 
 train_dataloader = dict(
     batch_size=1,
@@ -345,13 +354,13 @@ train_dataloader = dict(
 val_dataloader = dict(
     batch_size=1,
     num_workers=4,
-    sampler=dict(type='DefaultSampler', shuffle=False),
+    sampler=dict(type='mmengine.DefaultSampler', shuffle=False),
     dataset=dict(
         type='VADCustomNuScenesDataset',
         data_root=data_root,
         ann_file=data_root + 'vad_nuscenes_infos_temporal_val.pkl',
         pipeline=test_pipeline,
-        classes=class_names,
+        metainfo=dict(classes=class_names),
         modality=dict(use_lidar=False, use_camera=True),
         test_mode=True,
         bev_size=(bev_h_, bev_w_),
