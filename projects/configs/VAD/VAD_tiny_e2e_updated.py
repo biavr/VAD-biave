@@ -321,10 +321,18 @@ train_pipeline = [
 test_pipeline = [
     dict(type='mmdet3d.LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
-    dict(
-        type='mmdet3d.Pack3DDetInputs', 
-        keys=['img']#, 'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat']
-    )
+    # dict(type='mmdet3d.Pack3DDetInputs', 
+    #      keys=['img', 'gt_bboxes_3d', 'gt_labels_3d'], # Standard box keys
+    #      meta_keys=[
+    #         'lidar2img', 'can_bus', 'timestamp', 'sample_idx',
+    #         'img_metas', # Add this to preserve the dictionary structure
+    #         'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 
+    #         'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'
+    #      ]),
+    # dict(
+    #     type='mmdet3d.Pack3DDetInputs', 
+    #     keys=['img']#, 'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat']
+    # )
 ]
 
 

@@ -1250,7 +1250,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         # print("="*50 + "\n")
         """Bridge old VAD list-style pkl to new MMEngine dict-style."""
         # 1. Load the pkl file
-        print(f">>> Loading annotations from: {self.ann_file}")
+        # print(f">>> Loading annotations from: {self.ann_file}")
         annotations = load(self.ann_file)
         
         # 2. Extract the raw data list
@@ -1414,8 +1414,9 @@ class VADCustomNuScenesDataset(NuScenesDataset):
     #     return example
 
     def prepare_test_data(self, index):
-        """Prepare data for testing."""
-        # Parallel worker tracking guard
+        """Prepare data for testing cleanly aligned with OpenMMLab 3.x collation."""
+        # 1. Multiprocessing Worker Guard
+        print(f">>> Preparing test data for index: {index} in worker PID: {os.getpid()}")
         if not hasattr(self, 'data_list') or len(self.data_list) == 0:
             if hasattr(self, 'data_infos') and len(self.data_infos) > 0:
                 self.data_list = self.data_infos
@@ -1423,9 +1424,10 @@ class VADCustomNuScenesDataset(NuScenesDataset):
                 self.data_list = self.load_data_list()
                 self.data_infos = self.data_list
 
+        # 2. Extract frame record data info
         input_dict = self.get_data_info(index)
         
-        # Pull custom trajectory fields out before the pipeline runs
+        # 3. Pull target trajectory planning vectors metrics out up front
         planning_data = {
             'ego_his_trajs': input_dict.get('ego_his_trajs', None),
             'ego_fut_trajs': input_dict.get('ego_fut_trajs', None),
@@ -1434,36 +1436,52 @@ class VADCustomNuScenesDataset(NuScenesDataset):
             'ego_lcf_feat': input_dict.get('ego_lcf_feat', None),
         }
 
+        # 4. Route through config pipeline transforms
         example = self.pipeline(input_dict)
         if self.is_vis_on_test:
             example = self.vectormap_pipeline(example, input_dict)
             
+        # 5. Extract multi-view image array and force clean Tensor conversion
+        import torch
+        import numpy as np
+        
+        # 🔥 POP THE IMAGE OUT NOW: This protects it from Pack3DDetInputs stripping it away!
         combined_img = example.pop('img', None)
+        
         if combined_img is not None:
+            # print(f">>> Debug: Extracted combined_img of type {type(combined_img)} with shape {getattr(combined_img, 'shape', 'N/A')}")
             if isinstance(combined_img, list):
-                import torch
-                import numpy as np
+                # print(f">>> Debug: combined_img is a list with {len(combined_img)} elements. First element type: {type(combined_img[0])}")
                 combined_img = [torch.from_numpy(c) if isinstance(c, np.ndarray) else c for c in combined_img]
                 combined_img = torch.stack(combined_img)
             elif isinstance(combined_img, np.ndarray):
-                import torch
+                # print(f">>> Debug: combined_img is a numpy array with shape {combined_img.shape} and dtype {combined_img.dtype}")
                 combined_img = torch.from_numpy(combined_img)
+            
+            if isinstance(combined_img, torch.Tensor):
+                # print(f">>> Debug: Successfully converted combined_img to Tensor with shape {combined_img.shape} and dtype {combined_img.dtype}")
+                combined_img = combined_img.float()
 
-        # Package data through modern 3.x standards 
+        # 6. Build the modern MMEngine data packaging sample object safely
         packed_results = self.packer(example)
         
-        # Inject custom fields into metainfo fields where the network can read them
+        # 7. Harvest real img_metas produced by pipeline layers
+        img_metas = example.get('img_metas', input_dict)
+        packed_results['data_samples'].set_metainfo({'img_metas': img_metas})
+        
+        # 8. Store custom VAD attributes directly into sample metainfo fields
         for k, v in planning_data.items():
             if v is not None:
-                import torch
-                import numpy as np
                 if isinstance(v, np.ndarray):
                     v = torch.from_numpy(v)
                 packed_results['data_samples'].set_metainfo({k: v})
                 
+        # 9. Manually map the inputs dictionary at the root level (Exactly like prepare_train_data)
         if combined_img is not None:
+            # print(f">>> Debug: Final combined_img type before packing: {type(combined_img)}, shape: {getattr(combined_img, 'shape', 'N/A')}")
             packed_results['inputs'] = dict(img=combined_img)
         else:
+            # print(f">>> WARNING: No combined_img found for index {index}. Setting inputs to empty dict.")
             packed_results['inputs'] = dict()
             
         return packed_results
