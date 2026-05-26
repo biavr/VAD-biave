@@ -242,8 +242,9 @@ class VADPerceptionTransformer(BaseModule):
             np.sin(bev_angle / 180 * np.pi) / grid_length_x / bev_w
         shift_y = shift_y * self.use_shift
         shift_x = shift_x * self.use_shift
-        shift = bev_queries.new_tensor(
-            [shift_x, shift_y]).permute(1, 0)  # xy, bs -> bs, xy
+        # shift = bev_queries.new_tensor(np.array(some_list_of_arrays))
+        shift = bev_queries.new_tensor(np.array(
+            [shift_x, shift_y])).permute(1, 0)  # xy, bs -> bs, xy
 
         if prev_bev is not None:
             if prev_bev.shape[1] == bev_h * bev_w:
@@ -263,7 +264,7 @@ class VADPerceptionTransformer(BaseModule):
         # add can bus signals
         # 1. Ensure can_bus data exists and is a tensor
         can_bus_list = [each['can_bus'] for each in kwargs['img_metas']]
-        can_bus = bev_queries.new_tensor(can_bus_list) # Inherits device and default dtype
+        can_bus = bev_queries.new_tensor(np.array(can_bus_list)) # Inherits device and default dtype
         
         # 2. MATCH DTYPE: Ensure can_bus matches the MLP weights (usually Float32)
         mlp_dtype = self.can_bus_mlp[0].weight.dtype

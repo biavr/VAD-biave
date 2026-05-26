@@ -1049,9 +1049,6 @@ class VADCustomNuScenesDataset(NuScenesDataset):
     ):
         print("\n!!! VAD DATASET INITIALIZING !!!\n") # Add this!
         # print(">>> Initializing VADCustomNuScenesDataset with custom_eval_version: ", custom_eval_version)
-        # if 'metainfo' not in kwargs:
-        #     print(">>> No metainfo provided, using default METAINFO.")
-        #     kwargs['metainfo'] = self.METAINFO
         if 'classes' in kwargs:
             classes_val = kwargs.pop('classes')
             kwargs['metainfo'] = dict(classes=classes_val)
@@ -1416,7 +1413,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
     def prepare_test_data(self, index):
         """Prepare data for testing cleanly aligned with OpenMMLab 3.x collation."""
         # 1. Multiprocessing Worker Guard
-        print(f">>> Preparing test data for index: {index} in worker PID: {os.getpid()}")
+        # print(f">>> Preparing test data for index: {index} in worker PID: {os.getpid()}")
         if not hasattr(self, 'data_list') or len(self.data_list) == 0:
             if hasattr(self, 'data_infos') and len(self.data_infos) > 0:
                 self.data_list = self.data_infos
