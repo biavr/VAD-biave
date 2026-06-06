@@ -1047,7 +1047,7 @@ class VADHead(DETRHead):
         traj_weights = torch.zeros_like(traj_targets)
         
         # ======================================================================
-        # 🔥 NUMPY TO PYTORCH CUDA CONVERSION PATCH
+        # NUMPY TO PYTORCH CUDA CONVERSION PATCH
         # ======================================================================
         # The logs show that gt_fut_trajs and gt_fut_masks arrive as raw NumPy 
         # arrays. We must forcefully cast them to tensors matching our GPU device.
@@ -1068,7 +1068,13 @@ class VADHead(DETRHead):
 
         # Filter out invalid fut trajs
         traj_masks = torch.zeros_like(traj_targets)  # [num_bboxes, fut_ts*2]
-        gt_fut_masks = gt_fut_masks.unsqueeze(-1).repeat(1, 1, 2).view(num_gt_bbox, -1)  # [num_gt_bbox, fut_ts*2]
+        if num_gt_bbox == 0:
+            # Dynamically compute the flattened footprint size based on the timesteps
+            flat_dim = gt_fut_masks.shape[1] * 2 if len(gt_fut_masks.shape) > 1 else (self.fut_ts * 2)
+            gt_fut_masks = gt_fut_masks.new_zeros((0, flat_dim))
+        else:
+            # This original processing code runs perfectly when objects are in the scene
+            gt_fut_masks = gt_fut_masks.unsqueeze(-1).repeat(1, 1, 2).view(num_gt_bbox, -1)  # [num_gt_bbox, fut_ts*2]
         traj_masks[pos_inds] = gt_fut_masks[sampling_result.pos_assigned_gt_inds]
         traj_weights = traj_weights * traj_masks
 

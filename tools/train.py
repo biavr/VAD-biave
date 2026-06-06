@@ -55,7 +55,6 @@ from mmdet.registry import MODELS
 from mmengine.logging import MMLogger
 from mmdet.utils.collect_env import collect_env
 
-print("✅ Internal Compatibility Patch Activated. Bypassing External Files.")
 # --------------------------------------------
 
 import argparse
@@ -214,7 +213,7 @@ def main():
 
                 for m in _module_dir[1:]:
                     _module_path = _module_path + '.' + m
-                print(_module_path)
+                # print(_module_path)
                 plg_lib = importlib.import_module(_module_path)
             else:
                 # import dir is the dirpath for the config file
@@ -223,7 +222,7 @@ def main():
                 _module_path = _module_dir[0]
                 for m in _module_dir[1:]:
                     _module_path = _module_path + '.' + m
-                print(_module_path)
+                # print(_module_path)
                 plg_lib = importlib.import_module(_module_path)
 
             # from projects.mmdet3d_plugin.bevformer.apis import custom_train_model

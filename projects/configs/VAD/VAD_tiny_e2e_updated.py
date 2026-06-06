@@ -38,9 +38,12 @@ _num_levels_ = 1
 bev_h_ = 100
 bev_w_ = 100
 queue_length = 3
-total_epochs = 15
-# total_epochs = 2
-data_root = '/workspace/datasets/nuscenes/nuscenes/'
+# total_epochs = 15
+total_epochs = 2
+# mini
+# data_root = '/workspace/datasets/nuscenes/nuscenes/' 
+# trainval normal
+data_root = '/workspace/datasets/nuscenes/v1.0-trainval/'
   
 # --- Model Configuration ---
 model = dict(

@@ -30,6 +30,8 @@ CUDA_VISIBLE_DEVICES=2 python tools/test.py /workspace/VAD/projects/configs/VAD/
 
 PYTHONPATH=. CUDA_VISIBLE_DEVICES=2 python tools/test_new.py /workspace/VAD/projects/configs/VAD/VAD_tiny_e2e_updated.py /workspace/logs/outputs_19_05_nuscenes_mini/epoch_15.pth --launcher none --eval bbox --tmpdir tmp
 
+CUDA_VISIBLE_DEVICES=2 python tools/test_new.py /workspace/VAD/projects/configs/VAD/VAD_tiny_e2e_updated.py /workspace/logs/outputs_19_05_nuscenes_mini/epoch_15.pth --launcher none --eval bbox --tmpdir tmp
+
 ```
 
 **NOTE**: Using distributed mode (multi GPUs) for evaluation will lead to inaccurate results, so make sure to use non-distributed mode (1 GPU) for evaluation.
