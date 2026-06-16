@@ -261,8 +261,6 @@ def main():
         # re-set gpu_ids with distributed training mode
         _, world_size = get_dist_info()
         cfg.gpu_ids = range(world_size)
-
-    print("Create work dir...")
     
     # create work_dir
     from mmengine.utils import mkdir_or_exist

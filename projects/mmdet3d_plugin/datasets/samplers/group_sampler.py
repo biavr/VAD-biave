@@ -41,6 +41,26 @@ class DistributedGroupSampler(Sampler):
             num_replicas = _num_replicas
         if rank is None:
             rank = _rank
+        real_source = dataset
+        while not hasattr(real_source, 'flag'):
+            if hasattr(real_source, 'dataset') and real_source.dataset is not None:
+                real_source = real_source.dataset
+            elif hasattr(real_source, 'datasets') and isinstance(real_source.datasets, (list, tuple)) and len(real_source.datasets) > 0:
+                real_source = real_source.datasets[0]
+            else:
+                break
+
+        # If a nested .flag attribute was found, copy it back up to the top level 
+        if hasattr(real_source, 'flag'):
+            dataset.flag = real_source.flag
+        else:
+            # Fallback helper: generate an on-the-fly uniform flag grid to prevent the crash
+            # if the dataset doesn't explicitly group images by aspect ratios
+            import numpy as np
+            dataset.flag = np.zeros(len(dataset), dtype=np.int64)
+
+        # Ensure the parameter is available before passing the safety check
+        assert hasattr(dataset, 'flag'), "Dataset instance is missing the required '.flag' attribute mapping sequence."
         self.dataset = dataset
         self.samples_per_gpu = samples_per_gpu
         self.num_replicas = num_replicas

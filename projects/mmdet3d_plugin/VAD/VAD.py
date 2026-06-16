@@ -491,7 +491,19 @@ class VAD(MVXTwoStageDetector):
                       data_samples=None,
                       **kwargs):
         """Forward training function modernized for MMEngine.
-        """        
+        """    
+        # Debugging logs
+        import logging
+        logger = logging.getLogger('mmengine')
+        
+        # Track if map or planning attributes exist in kwargs
+        alive_keys = list(kwargs.keys())
+        logger.info(f"== [VAD DATA INSPECTOR] Available Training Kwargs: {alive_keys} ==")
+        
+        # Check if sample data containers are populated
+        if data_samples is not None and len(data_samples) > 0:
+            logger.info(f"== [VAD DATA INSPECTOR] Data Sample Metainfo Keys: {list(data_samples[0].metainfo.keys()) if hasattr(data_samples[0], 'metainfo') else 'No Metainfo'} ==")    
+        
         # 1. Get the GPU device from the model's weights
         device = next(self.parameters()).device
         

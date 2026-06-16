@@ -1086,7 +1086,8 @@ class VADHead(DETRHead):
         traj_weights = traj_weights * fut_ts_mask
 
         # DETR
-        bbox_targets[pos_inds] = sampling_result.pos_gt_bboxes
+        if num_gt_bbox > 0:
+            bbox_targets[pos_inds] = sampling_result.pos_gt_bboxes
 
         return (
             labels, label_weights, bbox_targets, bbox_weights, traj_targets,

@@ -408,4 +408,6 @@ default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=5),
     logger=dict(type='LoggerHook', interval=100))
 
+find_unused_parameters=True
+
 custom_hooks = [dict(type='CustomSetEpochInfoHook')]

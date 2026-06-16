@@ -8,7 +8,10 @@
 ```shell
 cd /path/to/VAD
 conda activate vad
-CUDA_VISIBLE_DEVICES=2 python -m torch.distributed.run --nproc_per_node=1 --master_port=2333 tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --launcher none --deterministic --work-dir /workspace/logs/outputs
+CUDA_VISIBLE_DEVICES=1,2,3 python -m torch.distributed.run --nproc_per_node=1 --master_port=2333 tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --launcher none --deterministic --work-dir /workspace/logs/outputs
+
+CUBLAS_WORKSPACE_CONFIG=:4096:8 CUDA_VISIBLE_DEVICES=1,2,3 python -m torch.distributed.run --nproc_per_node=3 --master_port=2333 tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --launcher pytorch --work-dir /workspace/logs/outputs
+
 
 CUBLAS_WORKSPACE_CONFIG=:4096:8 
 CUDA_VISIBLE_DEVICES=2 python -m torch.distributed.run --nproc_per_node=1 --master_port=2333 tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --launcher none --work-dir /workspace/logs/outputs
@@ -30,7 +33,7 @@ CUDA_VISIBLE_DEVICES=2 python tools/test.py /workspace/VAD/projects/configs/VAD/
 
 PYTHONPATH=. CUDA_VISIBLE_DEVICES=2 python tools/test_new.py /workspace/VAD/projects/configs/VAD/VAD_tiny_e2e_updated.py /workspace/logs/outputs_19_05_nuscenes_mini/epoch_15.pth --launcher none --eval bbox --tmpdir tmp
 
-CUDA_VISIBLE_DEVICES=2 python tools/test_new.py /workspace/VAD/projects/configs/VAD/VAD_tiny_e2e_updated.py /workspace/logs/outputs_19_05_nuscenes_mini/epoch_15.pth --launcher none --eval bbox --tmpdir tmp
+CUDA_VISIBLE_DEVICES=2 python tools/test_new.py /workspace/VAD/projects/configs/VAD/VAD_tiny_e2e_updated.py /workspace/logs/outputs_10_06_nuscenes_full/epoch_2.pth --launcher none --eval bbox --tmpdir tmp
 
 ```
 
