@@ -156,30 +156,32 @@ def main():
         }
 
         # 4. Run the file-based devkit evaluator inside a temporary folder context
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            res_mock_path = osp.join(tmp_dir, 'submission_output.json')
-            with open(res_mock_path, 'w') as f:
-                dump(submission_dict, f)
+        permanent_eval_dir = '/workspace/logs/permanent_results/metrics_plots'
+        os.makedirs(permanent_eval_dir, exist_ok=True)
+        
+        res_mock_path = osp.join(permanent_eval_dir, 'submission_output.json')
+        with open(res_mock_path, 'w') as f:
+            dump(submission_dict, f)
 
-            print("[VAD OFFLINE MODE] Starting official NuScenesEval execution engine...")
-            evaluator_engine = NuScenesEval(
-                nusc=nusc_db,
-                config=eval_config,
-                result_path=res_mock_path,
-                eval_set='val',
-                output_dir=tmp_dir,
-                verbose=True
-            )
+        print("[VAD OFFLINE MODE] Starting official NuScenesEval execution engine...")
+        evaluator_engine = NuScenesEval(
+            nusc=nusc_db,
+            config=eval_config,
+            result_path=res_mock_path,
+            eval_set='val',
+            output_dir=permanent_eval_dir,  # 🌟 Directs plots and JSONs to stay forever!
+            verbose=True
+        )
 
-            print("\n================ OFFICIAL DEVKIT RUNNING ================")
-            eval_output = evaluator_engine.main(plot_examples=False)
-            metrics_summary = eval_output[0] if isinstance(eval_output, tuple) else eval_output
-            print("=========================================================\n")
-            
-            print("================ EVALUATION SUMMARY METRICS ================")
-            import pprint
-            pprint.pprint(metrics_summary)
-            print("============================================================")
+        print("\n================ OFFICIAL DEVKIT RUNNING ================")
+        eval_output = evaluator_engine.main(plot_examples=False)
+        metrics_summary = eval_output[0] if isinstance(eval_output, tuple) else eval_output
+        print("=========================================================\n")
+        
+        print("================ EVALUATION SUMMARY METRICS ================")
+        import pprint
+        pprint.pprint(metrics_summary)
+        print("============================================================")
                 
         return  # Terminate early and safely!
     # ======================================================================

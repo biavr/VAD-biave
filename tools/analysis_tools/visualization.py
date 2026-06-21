@@ -9,13 +9,22 @@ from typing import List, Dict
 
 import cv2
 import mmcv
+import mmengine
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from pyquaternion import Quaternion
 from nuscenes.nuscenes import NuScenes
-from mmdet.datasets.pipelines import to_tensor
+# from mmdet.datasets.pipelines import to_tensor
+try:
+    from mmdet.datasets.pipelines import to_tensor
+except ImportError:
+    # Safe modern MMEngine / Torch conversion fallback
+    def to_tensor(data):
+        if isinstance(data, torch.Tensor):
+            return data
+        return torch.from_numpy(np.array(data))
 from matplotlib.collections import LineCollection
 from nuscenes.utils.data_classes import LidarPointCloud, Box
 from nuscenes.eval.common.data_classes import EvalBoxes, EvalBox
@@ -733,23 +742,77 @@ if __name__ == '__main__':
     args = parse_args()
     inference_result_path = args.result_path
     out_path = args.save_path
-    bevformer_results = mmcv.load(inference_result_path)
-    sample_token_list = list(bevformer_results['results'].keys())
+    bevformer_results = mmengine.load(inference_result_path)
+    # sample_token_list = list(bevformer_results['results'].keys())
+    if isinstance(bevformer_results, list):
+        print("Detected standard evaluation list payload structure.")
+        
+        # Initialize a temporary nuScenes database tracker to resolve index maps
+        from nuscenes import NuScenes
+        print("Building temporary database token lookup map...")
+        temp_nusc = NuScenes(version='v1.0-trainval', dataroot='/workspace/datasets/nuscenes/v1.0-trainval', verbose=False)
+        
+        mapped_results = {}
+        for item in bevformer_results:
+            if isinstance(item, dict) and 'sample_idx' in item:
+                idx = item['sample_idx']
+                try:
+                    # Resolve the precise 32-character validation token hash via the index tracking table
+                    token = temp_nusc.sample[idx]['token']
+                    
+                    # Create a uniform structure matching what the original script loops over
+                    # ensuring downstream bounding box, map, and trajectory keys resolve cleanly
+                    item['sample_token'] = token
+                    mapped_results[token] = item
+                except Exception:
+                    pass
+                    
+        bevformer_results = {'results': mapped_results}
 
-    nusc = NuScenes(version='v1.0-trainval', dataroot='./data/nuscenes', verbose=True)
+    sample_token_list = list(bevformer_results['results'].keys())
+    print(f"Successfully resolved token parsing anchors. Found {len(sample_token_list)} sequences.")
+
+    nusc = NuScenes(version='v1.0-trainval', dataroot='/workspace/datasets/nuscenes/v1.0-trainval', verbose=True)
     
     imgs = []
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     video_path = osp.join(out_path, 'vis.mp4')
     video = cv2.VideoWriter(video_path, fourcc, 10, (2933, 800), True)
+    print("Launching rendering loop across resolved sequences...")
+    for token, item in bevformer_results['results'].items():
+        if isinstance(item, dict):
+            # Graft the predictions into the 'pts_bbox' field if it only exists in 'pred_instances_3d'
+            if 'pts_bbox' not in item and 'pred_instances_3d' in item:
+                item['pts_bbox'] = item['pred_instances_3d']
+            elif 'pred_instances_3d' not in item and 'pts_bbox' in item:
+                item['pred_instances_3d'] = item['pts_bbox']
+    if 'plan_results' not in bevformer_results:
+        # Fallback to map planning metrics from internal frame keys if necessary
+        bevformer_results['plan_results'] = {}
+        for token, item in bevformer_results['results'].items():
+            if isinstance(item, dict) and 'plan_results' in item:
+                bevformer_results['plan_results'][token] = item['plan_results']
+
+    # 3. Execute the rendering loop using our pristine wrapped data matrix
     for id in tqdm(range(len(sample_token_list))):
-        mmcv.mkdir_or_exist(out_path)
-        render_sample_data(sample_token_list[id],
-                           pred_data=bevformer_results,
-                           out_path=out_path)
+        mmengine.mkdir_or_exist(out_path)
+        sample_token = sample_token_list[id]
+        
+        try:
+            # Pass our perfectly formatted nested dictionary wrapper
+            render_sample_data(sample_token,
+                               pred_data=bevformer_results,
+                               out_path=out_path)
+        except Exception as e:
+            print(f"\n[VAD VISUALIZER] Skipping frame {sample_token} due to rendering error: {str(e)}")
+            continue
+
+        # --- Your original downstream camera/video compilation code starts here ---
         pred_path = osp.join(out_path, 'bev_pred.png')
         pred_img = cv2.imread(pred_path)
-        os.remove(pred_path)
+
+        if pred_img is not None:
+            os.remove(pred_path)
 
         sample_token = sample_token_list[id]
         sample = nusc.get('sample', sample_token)
