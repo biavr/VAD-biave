@@ -18,6 +18,8 @@ CUDA_VISIBLE_DEVICES=2 python -m torch.distributed.run --nproc_per_node=1 --mast
 
 CUDA_VISIBLE_DEVICES=2 python tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --work-dir /workspace/logs/outputs
 
+CUDA_VISIBLE_DEVICES=4 python tools/train.py projects/configs/VAD/VAD_base_e2e_updated.py --work-dir /workspace/logs/outputs_stage_1
+
 2>&1 | tee logs.txt
 ```
 
