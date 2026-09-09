@@ -14,12 +14,12 @@ plugin_dir = 'projects/mmdet3d_plugin/'
 default_scope = 'mmdet3d'
 
 custom_imports = dict(
-    imports=['mmdet.models.layers.transformer',
+    imports=['projects.mmdet3d_plugin',
+             'mmdet.models.layers.transformer',
              'mmdet.models.layers',
              'mmdet3d', 
              'mmdet3d.models.data_preprocessors',
              'mmdet.models.losses',
-             'projects.mmdet3d_plugin',
              'projects.mmdet3d_plugin.core.bbox.coders.fut_nms_free_coder',
              'projects.mmdet3d_plugin.core.bbox.coders.map_nms_free_coder',
              'projects.mmdet3d_plugin.datasets.pipelines', 
@@ -29,6 +29,8 @@ custom_imports = dict(
 
 point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
 voxel_size = [0.15, 0.15, 4]
+img_norm_cfg = dict(
+    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
 class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
@@ -80,7 +82,7 @@ model = dict(
         with_box_refine=True,
         as_two_stage=False,
         transformer=dict(
-            type='VADTransformer',
+            type='VADHead',
             rotate_step=1,
             num_feature_levels=4,
             num_cams=6,
@@ -111,7 +113,7 @@ model = dict(
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm'))),
             decoder=dict(
-                type='VADTransformerDecoder',
+                type='DetectionTransformerDecoder',
                 num_layers=6,
                 return_intermediate=True,
                 transformerlayers=dict(
@@ -132,23 +134,25 @@ model = dict(
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm')))),
         bbox_coder=dict(
-            type='NMSFreeCoder',
-            post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
+            type='projects.mmdet3d_plugin.core.bbox.coders.fut_nms_free_coder.CustomNMSFreeCoder',
+            post_center_range=[-20, -35, -10.0, 20, 35, 10.0],
             pc_range=point_cloud_range,
-            max_num=300,
-            num_classes=10),
+            max_num=100,
+            voxel_size=voxel_size,
+            num_classes=num_classes),
         map_bbox_coder=dict(
             type='projects.mmdet3d_plugin.core.bbox.coders.map_nms_free_coder.MapNMSFreeCoder',
             post_center_range=[-20, -35, -20, -35, 20, 35, 20, 35],
             pc_range=point_cloud_range,
-            max_num=100,
+            max_num=50,
             voxel_size=voxel_size,
             num_classes=map_num_classes),
-        positional_encoding=dict(
+         positional_encoding=dict(
             type='LearnedPositionalEncoding',
-            num_feats=128,
-            row_num_embed=50,
-            col_num_embed=50),
+            num_feats=_pos_dim_,
+            row_num_embed=bev_h_,
+            col_num_embed=bev_w_,
+            ),
         loss_cls=dict(
             type='mmdet.FocalLoss',
             use_sigmoid=True,
@@ -177,20 +181,18 @@ model = dict(
                 iou_cost=dict(type='mmdet.IoUReviewCost', weight=0.0)))))
 
 train_pipeline = [
-    dict(type='mmdet3d.LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=5),
-    dict(type='mmdet3d.LoadPointsFromMultiViewImages', replace_img_with_black=False),
-    dict(type='mmdet3d.PhotoMetricDistortionMultiViewImage'),
-    dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_map_3d=True, with_traj_3d=True),
-    dict(type='mmdet3d.ObjectRangeFilter3D', point_cloud_range=point_cloud_range),
-    dict(type='mmdet3d.ObjectNameFilter3D', classes=[
-        'car', 'truck', 'trailer', 'bus', 'construction_vehicle',
-        'bicycle', 'motorcycle', 'pedestrian', 'traffic_cone', 'barrier'
-    ]),
-    dict(type='mmdet3d.DefaultFormatBundle3D', class_names=[
-        'car', 'truck', 'trailer', 'bus', 'construction_vehicle',
-        'bicycle', 'motorcycle', 'pedestrian', 'traffic_cone', 'barrier'
-    ]),
-    dict(type='mmengine.Pack3DDetInputs', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_maps_3d', 'gt_trajs_3d'])
+    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='PhotoMetricDistortionMultiViewImage'),
+    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
+    dict(type='CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='CustomObjectNameFilter', classes=class_names),
+    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
+    dict(type='RandomScaleImageMultiViewImage', scales=[0.8]),
+    dict(type='PadMultiViewImage', size_divisor=32),
+    dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_ego=True),
+    dict(type='CustomCollect3D',\
+         keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'ego_his_trajs',
+               'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'])
 ]
 
 val_pipeline = [

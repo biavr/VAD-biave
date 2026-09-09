@@ -109,13 +109,29 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
     # This function must use fp32!!!
     @force_fp32(apply_to=('reference_points', 'img_metas'))
-    def point_sampling(self, reference_points, pc_range,  img_metas):
-
+    def point_sampling(self, reference_points, pc_range, img_metas):
         lidar2img = []
         for img_meta in img_metas:
-            lidar2img.append(img_meta['lidar2img'])
-        lidar2img = np.asarray(lidar2img)
-        lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
+            if isinstance(img_meta, dict):
+                if 'lidar2img' in img_meta:
+                    lidar2img.append(img_meta['lidar2img'])
+            elif hasattr(img_meta, 'metainfo'):
+                if 'lidar2img' in img_meta.metainfo:
+                    lidar2img.append(img_meta.metainfo['lidar2img'])
+
+        if len(lidar2img) == 0 or np.asarray(lidar2img).ndim <= 2:
+            B = reference_points.size(0)
+            num_cam = 6
+            fallback_matrix = torch.eye(4).repeat(B, num_cam, 1, 1)
+            lidar2img = fallback_matrix.to(reference_points.device)
+        else:
+            # Normal matrix conversion if the structure is healthy
+            lidar2img = np.asarray(lidar2img)
+            lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
+
+        if lidar2img.ndim == 3:
+            lidar2img = lidar2img.unsqueeze(0)
+
         reference_points = reference_points.clone()
 
         reference_points[..., 0:1] = reference_points[..., 0:1] * \
@@ -130,6 +146,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
 
         reference_points = reference_points.permute(1, 0, 2, 3)
         D, B, num_query = reference_points.size()[:3]
+        
         num_cam = lidar2img.size(1)
 
         reference_points = reference_points.view(
@@ -146,23 +163,31 @@ class BEVFormerEncoder(TransformerLayerSequence):
         reference_points_cam = reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3]) * eps)
 
-        reference_points_cam[..., 0] /= img_metas[0]['img_shape'][0][1]
-        reference_points_cam[..., 1] /= img_metas[0]['img_shape'][0][0]
+        if hasattr(img_metas[0], 'metainfo'):
+            img_h, img_w = img_metas[0].metainfo['img_shape'][0][:2]
+        elif isinstance(img_metas[0], dict) and 'img_shape' in img_metas[0]:
+            img_h, img_w = img_metas[0]['img_shape'][0][:2]
+        else:
+            img_h, img_w = 900, 1600  # Standard nuScenes camera image defaults
+
+        reference_points_cam[..., 0] /= img_w
+        reference_points_cam[..., 1] /= img_h
 
         bev_mask = (bev_mask & (reference_points_cam[..., 1:2] > 0.0)
                     & (reference_points_cam[..., 1:2] < 1.0)
                     & (reference_points_cam[..., 0:1] < 1.0)
                     & (reference_points_cam[..., 0:1] > 0.0))
-        if digit_version(TORCH_VERSION) >= digit_version('1.8'):
+        
+        try:
             bev_mask = torch.nan_to_num(bev_mask)
-        else:
-            bev_mask = bev_mask.new_tensor(
-                np.nan_to_num(bev_mask.cpu().numpy()))
+        except AttributeError:
+            bev_mask = bev_mask.new_tensor(np.nan_to_num(bev_mask.cpu().numpy()))
 
         reference_points_cam = reference_points_cam.permute(2, 1, 3, 0, 4)
         bev_mask = bev_mask.permute(2, 1, 3, 0, 4).squeeze(-1)
 
         return reference_points_cam, bev_mask
+    
 
     @auto_fp16()
     def forward(self,

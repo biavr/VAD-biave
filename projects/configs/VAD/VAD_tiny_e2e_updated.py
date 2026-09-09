@@ -291,8 +291,10 @@ train_pipeline = [
          meta_keys=[
             'lidar2img', 'can_bus', 'timestamp', 'sample_idx',
             'img_metas', # Add this to preserve the dictionary structure
-            'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 
-            'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'
+            'gt_attr_labels',     # <--- Kept in meta_keys to avoid the NotImplementedError
+            'gt_ego_his_trajs', 'gt_ego_fut_trajs', 'gt_ego_fut_masks', 
+            'gt_ego_fut_cmd', 'gt_ego_lcf_feat'
+            'box_mode_3d', 'box_type_3d', 'point_cloud_range'
          ]),
     # dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomDefaultFormatBundle3D', class_names=class_names, with_ego=True),
     # dict(type='mmdet3d.Pack3DDetInputs', 

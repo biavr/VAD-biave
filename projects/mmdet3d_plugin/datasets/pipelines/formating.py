@@ -24,10 +24,16 @@ class CustomDefaultFormatBundle3D(Pack3DDetInputs):
     - gt_bboxes_ignore: (1)to tensor, (2)to DataContainer
     - gt_labels: (1)to tensor, (2)to DataContainer
     """
-    def __init__(self, class_names, with_gt=True, with_label=True, with_ego=True):
+    def __init__(self, class_names, with_gt=True, with_label=True, with_ego=True, **kwargs):
         # super(CustomDefaultFormatBundle3D, self).__init__(class_names, with_gt, with_label)
-        super(CustomDefaultFormatBundle3D, self).__init__()
+        self.class_names = class_names
         self.with_ego = with_ego
+        
+        # Safe fallback: if keys isn't passed from config, inject the defaults
+        if 'keys' not in kwargs:
+            kwargs['keys'] = ['img', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_masks_bev']
+
+        super(CustomDefaultFormatBundle3D, self).__init__(**kwargs)
 
 
     def __call__(self, results):

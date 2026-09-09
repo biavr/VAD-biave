@@ -167,6 +167,7 @@ model = dict(
         bev_h=bev_h_,
         bev_w=bev_w_,
         num_query=300,
+        embed_dims=_dim_,
         num_classes=num_classes,
         in_channels=_dim_,
         sync_cls_avg_factor=True,
@@ -226,7 +227,7 @@ model = dict(
                     type='BaseTransformerLayer',
                     attn_cfgs=[
                         dict(type='MultiheadAttention', embed_dims=_dim_, num_heads=8, dropout=0.1),
-                        dict(type='CustomMSDeformableAttention', embed_dims=_dim_, num_levels=1),
+                        dict(type='MSDeformableAttention3D', embed_dims=_dim_, num_levels=1),
                     ],
                     feedforward_channels=_ffn_dim_,
                     ffn_dropout=0.1,
@@ -274,31 +275,31 @@ model = dict(
             col_num_embed=bev_w_,
             ),
         loss_cls=dict(
-            type='FocalLoss',
+            type='mmdet.FocalLoss',
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
             loss_weight=2.0),
-        loss_bbox=dict(type='L1Loss', loss_weight=0.25),
-        loss_traj=dict(type='L1Loss', loss_weight=0.2),
+        loss_bbox=dict(type='mmdet.L1Loss', loss_weight=0.25),
+        loss_traj=dict(type='mmdet.L1Loss', loss_weight=0.2),
         loss_traj_cls=dict(
-            type='FocalLoss',
+            type='mmdet.FocalLoss',
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
             loss_weight=0.2),
-        loss_iou=dict(type='GIoULoss', loss_weight=0.0),
+        loss_iou=dict(type='mmdet.GIoULoss', loss_weight=0.0),
         loss_map_cls=dict(
-            type='FocalLoss',
+            type='mmdet.FocalLoss',
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
             loss_weight=2.0),
-        loss_map_bbox=dict(type='L1Loss', loss_weight=0.0),
-        loss_map_iou=dict(type='GIoULoss', loss_weight=0.0),
+        loss_map_bbox=dict(type='mmdet.L1Loss', loss_weight=0.0),
+        loss_map_iou=dict(type='mmdet.GIoULoss', loss_weight=0.0),
         loss_map_pts=dict(type='PtsL1Loss', loss_weight=1.0),
         loss_map_dir=dict(type='PtsDirCosLoss', loss_weight=0.005),
-        loss_plan_reg=dict(type='L1Loss', loss_weight=1.0),
+        loss_plan_reg=dict(type='mmdet.L1Loss', loss_weight=1.0),
         loss_plan_bound=dict(type='PlanMapBoundLoss', loss_weight=1.0, dis_thresh=1.0),
         loss_plan_col=dict(type='PlanCollisionLoss', loss_weight=1.0),
         loss_plan_dir=dict(type='PlanMapDirectionLoss', loss_weight=0.5)),
@@ -329,15 +330,21 @@ train_pipeline = [
     dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
     dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomObjectNameFilter', classes=class_names),
-    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
+    dict(type='projects.mmdet3d_plugin.NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='projects.mmdet3d_plugin.datasets.pipelines.RandomScaleImageMultiViewImage', scales=[0.8]),
-    dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_ego=True),
-    dict(type='CustomCollect3D',\
-         keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'ego_his_trajs',
-               'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'])
-]
-
+    dict(type='projects.mmdet3d_plugin.PadMultiViewImage', size_divisor=32),
+    dict(
+        type='projects.mmdet3d_plugin.datasets.pipelines.CustomDefaultFormatBundle3D', 
+        keys=['img', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_masks_bev'],
+        class_names=class_names,
+        meta_keys=['lidar2img','camera_intrinsics','lidar2camera','sample_idx','timestamp'],
+        with_ego=True),
+    dict(
+        type='projects.mmdet3d_plugin.CustomCollect3D',
+        keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'ego_his_trajs',
+              'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'],
+        meta_keys=['lidar2img', 'camera_intrinsics', 'lidar2camera', 'sample_idx', 'timestamp'])
+    ]
 test_pipeline = [
     dict(type='mmdet3d.LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='mmdet3d.LoadPointsFromFile',
@@ -348,7 +355,7 @@ test_pipeline = [
     dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
     dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomObjectNameFilter', classes=class_names),
-    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
+    dict(type='projects.mmdet3d_plugin.NormalizeMultiviewImage', **img_norm_cfg),
     # dict(type='PadMultiViewImage', size_divisor=32),
     dict(
         type='MultiScaleFlipAug3D',
@@ -357,9 +364,13 @@ test_pipeline = [
         flip=False,
         transforms=[
             dict(type='RandomScaleImageMultiViewImage', scales=[0.8]),
-            dict(type='PadMultiViewImage', size_divisor=32),
-            dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_label=False, with_ego=True),
-            dict(type='CustomCollect3D',\
+            dict(type='projects.mmdet3d_plugin.PadMultiViewImage', size_divisor=32),
+            dict(
+                type='projects.mmdet3d_plugin.datasets.pipelines.CustomDefaultFormatBundle3D',
+                keys=['img', 'gt_bboxes_3d', 'gt_labels_3d', 'gt_masks_bev'],
+                class_names=class_names, 
+                with_label=False, with_ego=True),
+            dict(type='CustomCollect3D',
                  keys=['points', 'gt_bboxes_3d', 'gt_labels_3d', 'img', 'fut_valid_flag',
                        'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd',
                        'ego_lcf_feat', 'gt_attr_labels'])])
@@ -368,6 +379,8 @@ test_pipeline = [
 train_dataloader = dict(
     batch_size=1,
     num_workers=4,
+    samples_per_gpu=1,  
+    workers_per_gpu=4,
     persistent_workers=True,
     sampler=dict(type='mmengine.DefaultSampler', shuffle=True),
     dataset=dict(

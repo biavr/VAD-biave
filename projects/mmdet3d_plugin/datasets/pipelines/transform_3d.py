@@ -373,8 +373,42 @@ class CustomCollect3D(object):
 
         # data['img_metas'] = DC(img_metas, cpu_only=True)
         data['img_metas'] = img_metas
+
+        if 'gt_bboxes_3d' not in results:
+            if 'data_samples' in results:
+                data_sample = results['data_samples']
+                
+                # Unpack 3D Bounding Boxes
+                if hasattr(data_sample, 'gt_instances') and 'bboxes_3d' in data_sample.gt_instances:
+                    results['gt_bboxes_3d'] = data_sample.gt_instances.bboxes_3d
+                    
+                # Unpack Labels
+                if hasattr(data_sample, 'gt_instances') and 'labels_3d' in data_sample.gt_instances:
+                    results['gt_labels_3d'] = data_sample.gt_instances.labels_3d
+                    
+            # Backup: Check if they are stored in a nested dictionary instead of a class object
+            elif isinstance(results.get('data_samples'), dict):
+                gt_instances = results['data_samples'].get('gt_instances', {})
+                if 'bboxes_3d' in gt_instances:
+                    results['gt_bboxes_3d'] = gt_instances['bboxes_3d']
+                if 'labels_3d' in gt_instances:
+                    results['gt_labels_3d'] = gt_instances['labels_3d']
+
         for key in self.keys:
-            data[key] = results[key]
+            if key in results:
+                data[key] = results[key]
+            elif key == 'gt_bboxes_3d':
+                from mmdet3d.structures import LiDARInstance3DBoxes
+                import torch
+                box_dim = 9 if 'gt_velocity' in results else 7
+                results['gt_bboxes_3d'] = LiDARInstance3DBoxes(torch.zeros((0, box_dim)))
+                data[key] = results[key]
+            elif key == 'gt_labels_3d':
+                import torch
+                results['gt_labels_3d'] = torch.zeros((0,), dtype=torch.long)
+                data[key] = results[key]
+            else:
+                data[key] = results.get(key, None)
         return data
 
     def __repr__(self):

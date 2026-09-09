@@ -723,24 +723,6 @@ class VectorizedLocalMap(object):
                     })
             data_info['instances'] = instances
         
-        # # 2. If 'instances' is empty (legacy pkl), build it from gt_names/gt_boxes
-        # if (not data_info.get('instances')) and 'gt_names' in info:
-        #     instances = []
-        #     for i, name in enumerate(info['gt_names']):
-        #         # Clean the name using our mapping
-        #         clean_name = self.NAME_MAPPING.get(name, name)
-                
-        #         if clean_name in self.metainfo['classes']:
-        #             instances.append({
-        #                 'bbox_label': self.metainfo['classes'].index(clean_name),
-        #                 'bbox_3d': info['gt_boxes'][i],
-        #                 'ignore_flag': 0
-        #             })
-        #     data_info['instances'] = instances
-        #     # Debug: Print the first few samples to see the counts increasing
-        #     if random.random() < 0.01: # Print ~1% of samples
-        #         print(f">>> Dataset Debug: Parsed {len(instances)} instances for sample {info.get('token', 'N/A')}")
-            
         return data_info
 
 
@@ -1283,13 +1265,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         # 4. Final verification print
         if len(raw_data_list) > 0:
             sample_idx = random.randint(0, len(raw_data_list)-1)
-            # print(f">>> Debug: Sample {sample_idx} has {len(raw_data_list[sample_idx].get('instances', []))} counted instances.")
         self._fully_initialized = True
-        # if hasattr(self, 'label_mapping'):
-        #     print(f">>> Internal Label Mapping: {self.label_mapping}")
-        # print(f">>> Final Verification: First sample keys: {raw_data_list[0].keys()}")
-        # if 'instances' in raw_data_list[0]:
-        #     print(f">>> First sample instance labels: {[ins['bbox_label'] for ins in raw_data_list[0]['instances']]}")
         return raw_data_list
 
 
@@ -1301,119 +1277,145 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict: Training data dict of the corresponding index.
         """
-        # print(">>> Preparing training data for index: ", index)
+        import copy
+        import torch
+        import numpy as np
+        from mmengine.structures import InstanceData
+
         data_queue = []
         ann_info = self.get_ann_info(index)
 
-        # temporal aug
-        prev_indexs_list = list(range(index-self.queue_length, index))
+        # Temporal sequence indexing
+        prev_indexs_list = list(range(index - self.queue_length, index))
         random.shuffle(prev_indexs_list)
         prev_indexs_list = sorted(prev_indexs_list[1:], reverse=True)
-        ##
 
         input_dict = self.get_data_info(index)
         if input_dict is None:
-            print(f">>> Warning: No data info found for index {index}. Skipping this sample.")
             return None
+
         frame_idx = input_dict['frame_idx']
         scene_token = input_dict['scene_token']
-        # self.pre_pipeline(input_dict)
+
+        # Forward pipeline through vector map generator
         example = self.pipeline(input_dict)
-        example = self.vectormap_pipeline(example,input_dict)
-        if self.filter_empty_gt and \
-                ((example is None or ~(example['gt_labels_3d'] != -1).any()) or \
-                    (example is None or ~(example['map_gt_labels_3d'] != -1).any())):
+        example = self.vectormap_pipeline(example, input_dict)
+
+        if self.filter_empty_gt and (
+            (example is None or ~(example['gt_labels_3d'] != -1).any()) or 
+            (example is None or ~(example['map_gt_labels_3d'] != -1).any())
+        ):
             return None
+
         data_queue.insert(0, example)
+
         for i in prev_indexs_list:
             i = max(0, i)
             input_dict = self.get_data_info(i)
             if input_dict is None:
-                # print(f">>> Warning: No data info found for index {i}. Skipping this sample.")
                 return None
             if input_dict['frame_idx'] < frame_idx and input_dict['scene_token'] == scene_token:
-                # self.pre_pipeline(input_dict)
                 example = self.pipeline(input_dict)
-                example = self.vectormap_pipeline(example,input_dict)
-                if self.filter_empty_gt and \
-                        (example is None or ~(example['gt_labels_3d']._data != -1).any()) and \
-                            (example is None or ~(example['map_gt_labels_3d']._data != -1).any()):
+                example = self.vectormap_pipeline(example, input_dict)
+                if self.filter_empty_gt and (
+                    (example is None or ~(example['gt_labels_3d']._data != -1).any()) and 
+                    (example is None or ~(example['map_gt_labels_3d']._data != -1).any())
+                ):
                     return None
                 frame_idx = input_dict['frame_idx']
             data_queue.insert(0, copy.deepcopy(example))
+
         merged_data = self.union2one(data_queue)
         merged_data.update(ann_info)
-        # 1. Take the 5D image out so the packer doesn't try to permute it
-        combined_img = merged_data.pop('img') 
-        # Collect all planning/ego attributes
-        # planning_data = {
-        #     'ego_his_trajs': merged_data.pop('ego_his_trajs', None),
-        #     'ego_fut_trajs': merged_data.pop('ego_fut_trajs', None),
-        #     'ego_fut_masks': merged_data.pop('ego_fut_masks', None),
-        #     'ego_fut_cmd': merged_data.pop('ego_fut_cmd', None),
-        #     'ego_lcf_feat': merged_data.pop('ego_lcf_feat', None),
-        #     'gt_attr_labels': merged_data.pop('gt_attr_labels', None)
-        # }
-        planning_keys = [
-            'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 
-            'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'
-        ]
-        planning_data = {k: merged_data.pop(k, None) for k in planning_keys}
 
-        attr_labels = merged_data.pop('gt_attr_labels', None) 
+        # 1. Isolate the 5D image volume before the standard packer attempts tensor permutation
+        combined_img = merged_data.pop('img')
+
+        # 2. Extract vector map ground truth before the 3D packer drops unrecognized keys
+        map_keys = ['map_gt_bboxes_3d', 'map_gt_labels_3d', 'map_gt_pts_3d']
+        map_data = {k: merged_data.pop(k, None) for k in map_keys}
+
+        # 3. Extract agent attribute labels
+        attr_labels = merged_data.pop('gt_attr_labels', None)
         if attr_labels is None:
             attr_labels = merged_data.pop('vad_attr_labels', None)
-        # 2. Run the packer on everything else (boxes, labels, metas)
+
+        # 4. Pack standard 3D bounding boxes and camera projection matrices
         packed_results = self.packer(merged_data)
-        for k, v in planning_data.items():
-            if v is not None:
-                packed_results['data_samples'].set_metainfo({k: v})
-        # 3. Manually put the 5D image into the 1.x 'inputs' field
-        # PyTorch expects (C, H, W), VAD usually wants (N, Cam, C, H, W)
+        data_sample = packed_results['data_samples']
+
+        # 5. Format and attach the 5D camera image tensor (N, C, H, W)
         if not torch.is_tensor(combined_img):
             combined_img = torch.from_numpy(combined_img)
-            
-        if attr_labels is not None:
-            packed_results['data_samples'].set_metainfo({'gt_attr_labels': attr_labels})
+        packed_results['inputs'] = dict(img=combined_img)
 
-        if not hasattr(packed_results['data_samples'], 'gt_instances_3d'):
-            from mmengine.structures import InstanceData
+        # 6. Ensure 3D bounding box instance representations are explicitly assigned
+        if not hasattr(data_sample, 'gt_instances_3d'):
             gt_instances = InstanceData()
             gt_instances.bboxes_3d = ann_info['gt_bboxes_3d']
             gt_instances.labels_3d = torch.from_numpy(ann_info['gt_labels_3d'])
-            packed_results['data_samples'].gt_instances_3d = gt_instances
+            data_sample.gt_instances_3d = gt_instances
 
-        for key, value in planning_data.items():
-            if value is not None:
-                packed_results['data_samples'].set_metainfo({key: value})
-            else:
-                # Provide a zero-tensor fallback if data is missing to avoid NoneType errors
-                # print(f">>> WARNING: {key} is missing for this sample!")
-                packed_results['data_samples'].set_metainfo({'img_metas': merged_data['img_metas']})
-        packed_results['inputs'] = dict(img=combined_img)
-       
+        if attr_labels is not None:
+            data_sample.set_metainfo({'gt_attr_labels': attr_labels})
+
+        # 7. Inject vector map polylines directly into data_sample attributes and metadata
+        for k, v in map_data.items():
+            if v is not None:
+                setattr(data_sample, k, v)
+                if 'img_metas' in data_sample.metainfo:
+                    data_sample.metainfo['img_metas'][k] = v
+
+        # 8. Extract planning trajectory, validity masks, and directional commands
+        raw_info = self.data_infos[index] if hasattr(self, 'data_infos') else self.get_data_info(index)
+        raw_fut_trajs = raw_info.get('gt_ego_fut_trajs', raw_info.get('ego_fut_trajs'))
+        raw_fut_masks = raw_info.get('gt_ego_fut_masks', raw_info.get('ego_fut_masks'))
+        raw_fut_cmd = raw_info.get('gt_ego_fut_cmd', raw_info.get('ego_fut_cmd'))
+        raw_his_trajs = raw_info.get('gt_ego_his_trajs', raw_info.get('ego_his_trajs'))
+        raw_lcf_feat = raw_info.get('gt_ego_lcf_feat', raw_info.get('ego_lcf_feat'))
+
+        # Fallback to driving straight (index 0) if command is zero-valued or missing
+        if raw_fut_cmd is None or (isinstance(raw_fut_cmd, np.ndarray) and raw_fut_cmd.sum() == 0):
+            fut_mode = getattr(self, 'fut_mode', 3)
+            raw_fut_cmd = np.zeros(fut_mode, dtype=np.float32)
+            raw_fut_cmd[0] = 1.0
+
+        if raw_fut_masks is not None:
+            if not torch.is_tensor(raw_fut_masks):
+                raw_fut_masks = torch.from_numpy(np.array(raw_fut_masks)).float()
+            if not torch.is_tensor(raw_fut_trajs):
+                raw_fut_trajs = torch.from_numpy(np.array(raw_fut_trajs)).float()
+            if raw_fut_cmd is not None and not torch.is_tensor(raw_fut_cmd):
+                raw_fut_cmd = torch.from_numpy(np.array(raw_fut_cmd)).float()
+            if raw_his_trajs is not None and not torch.is_tensor(raw_his_trajs):
+                raw_his_trajs = torch.from_numpy(np.array(raw_his_trajs)).float()
+            if raw_lcf_feat is not None and not torch.is_tensor(raw_lcf_feat):
+                raw_lcf_feat = torch.from_numpy(np.array(raw_lcf_feat)).float()
+
+            plan_dict = {
+                'ego_fut_masks': raw_fut_masks,
+                'ego_fut_trajs': raw_fut_trajs,
+                'gt_ego_fut_masks': raw_fut_masks,
+                'gt_ego_fut_trajs': raw_fut_trajs,
+                'ego_fut_cmd': raw_fut_cmd,
+                'gt_ego_fut_cmd': raw_fut_cmd,
+            }
+            if raw_his_trajs is not None:
+                plan_dict['ego_his_trajs'] = raw_his_trajs
+                plan_dict['gt_ego_his_trajs'] = raw_his_trajs
+            if raw_lcf_feat is not None:
+                plan_dict['ego_lcf_feat'] = raw_lcf_feat
+                plan_dict['gt_ego_lcf_feat'] = raw_lcf_feat
+
+            data_sample.set_metainfo(plan_dict)
+            if 'img_metas' in data_sample.metainfo:
+                data_sample.metainfo['img_metas'].update(plan_dict)
+
         return packed_results
-
-    # def prepare_test_data(self, index):
-    #     """Prepare data for testing.
-
-    #     Args:
-    #         index (int): Index for accessing the target data.
-
-    #     Returns:
-    #         dict: Testing data dict of the corresponding index.
-    #     """
-    #     input_dict = self.get_data_info(index)
-    #     # self.pre_pipeline(input_dict)
-    #     example = self.pipeline(input_dict)
-    #     if self.is_vis_on_test:
-    #         example = self.vectormap_pipeline(example, input_dict)
-    #     return example
 
     def prepare_test_data(self, index):
         """Prepare data for testing cleanly aligned with OpenMMLab 3.x collation."""
         # 1. Multiprocessing Worker Guard
-        # print(f">>> Preparing test data for index: {index} in worker PID: {os.getpid()}")
         if not hasattr(self, 'data_list') or len(self.data_list) == 0:
             if hasattr(self, 'data_infos') and len(self.data_infos) > 0:
                 self.data_list = self.data_infos

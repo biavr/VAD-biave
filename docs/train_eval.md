@@ -14,11 +14,12 @@ CUBLAS_WORKSPACE_CONFIG=:4096:8 CUDA_VISIBLE_DEVICES=1,2,3 python -m torch.distr
 
 
 CUBLAS_WORKSPACE_CONFIG=:4096:8 
-CUDA_VISIBLE_DEVICES=2 python -m torch.distributed.run --nproc_per_node=1 --master_port=2333 tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --launcher none --work-dir /workspace/logs/outputs
+CUDA_VISIBLE_DEVICES=0,3 python -m torch.distributed.run --nproc_per_node=2 --master_port=2333 tools/train.py projects/configs/VAD/VAD_base_e2e_updated.py --launcher pytorch --work-dir /workspace/logs/outputs_e2e_multi
 
 CUDA_VISIBLE_DEVICES=2 python tools/train.py projects/configs/VAD/VAD_tiny_e2e_updated.py --work-dir /workspace/logs/outputs
 
 CUDA_VISIBLE_DEVICES=4 python tools/train.py projects/configs/VAD/VAD_base_e2e_updated.py --work-dir /workspace/logs/outputs_stage_1
+
 
 2>&1 | tee logs.txt
 ```

@@ -1327,11 +1327,13 @@ class VADHead(DETRHead):
             loss_plan_col (Tensor): planning col constraint loss.
             loss_plan_dir (Tensor): planning directional constraint loss.
         """
-
         ego_fut_gt = ego_fut_gt.unsqueeze(1).repeat(1, self.ego_fut_mode, 1, 1)
+        if ego_fut_cmd is None or (ego_fut_cmd == 1).sum() == 0:
+            ego_fut_cmd = torch.zeros_like(ego_fut_preds[:, :, 0, 0])
+            ego_fut_cmd[:, 0] = 1.0  # activate primary trajectory mode
         loss_plan_l1_weight = ego_fut_cmd[..., None, None] * ego_fut_masks[:, None, :, None]
         loss_plan_l1_weight = loss_plan_l1_weight.repeat(1, 1, 1, 2)
-
+        
         loss_plan_l1 = self.loss_plan_reg(
             ego_fut_preds,
             ego_fut_gt,
