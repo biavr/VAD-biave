@@ -47,7 +47,7 @@ map_num_classes = len(map_classes)
 bev_h_ = 200
 bev_w_ = 200
 queue_length = 4 # each sequence contains `queue_length` frames.
-total_epochs = 48
+total_epochs = 24
 
 data_root = '/workspace/datasets/nuscenes/v1.0-trainval/'
 
@@ -82,8 +82,7 @@ model = dict(
         with_box_refine=True,
         as_two_stage=False,
         transformer=dict(
-            type='VADHead',
-            rotate_step=1,
+            type='VADPerceptionTransformer',
             num_feature_levels=4,
             num_cams=6,
             two_stage_num_proposals=900,
@@ -92,7 +91,6 @@ model = dict(
                 num_layers=6,
                 pc_range=point_cloud_range,
                 num_points_in_pillar=4,
-                return_collection=False,
                 transformerlayers=dict(
                     type='BEVFormerLayer',
                     attn_cfgs=[
@@ -117,18 +115,14 @@ model = dict(
                 num_layers=6,
                 return_intermediate=True,
                 transformerlayers=dict(
-                    type='DetrTransformerDecoderLayer',
+                    type='BaseTransformerLayer',
                     attn_cfgs=[
                         dict(
                             type='MultiheadAttention',
                             embed_dims=256,
                             num_heads=8,
                             dropout=0.1),
-                        dict(
-                            type='CustomProtoAttention', # Re-routes custom VAD structures
-                            embed_dims=256,
-                            num_levels=4,
-                            num_points=4)
+                        dict(type='MultiheadAttention', embed_dims=256, num_heads=8, dropout=0.1),
                     ],
                     feedforward_channels=512,
                     ffn_dropout=0.1,
@@ -163,8 +157,8 @@ model = dict(
         loss_iou=dict(type='mmdet.GIOULoss', loss_weight=0.0),
         
         # Planning losses are muted or decoupled to anchor backbone training cleanly
-        loss_map_cls=dict(type='mmdet.FocalLoss', use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0),
-        loss_map_reg=dict(type='mmdet.L1Loss', loss_weight=1.0),
+        loss_map_cls=dict(type='mmdet.FocalLoss', use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=0.0),
+        loss_map_reg=dict(type='mmdet.L1Loss', loss_weight=0.0),
         loss_traj_cls=dict(type='mmdet.FocalLoss', use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=0.0),
         loss_traj_reg=dict(type='mmdet.L1Loss', loss_weight=0.0)),
     
@@ -196,11 +190,23 @@ train_pipeline = [
 ]
 
 val_pipeline = [
-    dict(type='mmdet3d.LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=5),
-    dict(type='mmdet3d.LoadPointsFromMultiViewImages', replace_img_with_black=False),
-    dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
-    dict(type='mmengine.Pack3DDetInputs', keys=['img', 'gt_bboxes_3d', 'gt_labels_3d'])
+    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
+    dict(type='PadMultiViewImage', size_divisor=32),
+    dict(
+        type='CustomDefaultFormatBundle3D',
+        class_names=class_names,
+        with_label=False,
+        with_ego=False),
+    dict(type='CustomCollect3D', keys=['img'])
 ]
+
+# val_pipeline = [
+#     dict(type='mmdet3d.LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=5),
+#     dict(type='mmdet3d.LoadPointsFromMultiViewImages', replace_img_with_black=False),
+#     dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
+#     dict(type='mmengine.Pack3DDetInputs', keys=['img', 'gt_bboxes_3d', 'gt_labels_3d'])
+# ]
 
 
 train_dataloader = dict(
@@ -248,7 +254,7 @@ test_dataloader = val_dataloader
 val_evaluator = dict(
     type='mmdet3d.NuScenesMetric',
     data_root=data_root,
-    ann_file=data_root + 'nuscenes_infos_temporal_val.pkl',
+    ann_file=data_root + 'vad_nuscenes_infos_temporal_val.pkl',
     metric='bbox')
 test_evaluator = val_evaluator
 
@@ -279,14 +285,14 @@ param_scheduler = [
     dict(
         type='MultiStepLR',
         begin=0,
-        end=24,
+        end=total_epochs,
         by_epoch=True,
         milestones=[16, 22],
         gamma=0.1)
 ]
 
 # Modern training state controllers loops configuration
-train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=24, val_interval=1)
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=total_epochs, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
