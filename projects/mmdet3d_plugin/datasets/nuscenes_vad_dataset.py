@@ -65,7 +65,8 @@ class LiDARInstanceLines(object):
         """
         return torch.Tensor([N,4]), in xstart, ystart, xend, yend form
         """
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 4), dtype=torch.float32)
         instance_se_points_list = []
         for instance in self.instance_list:
             se_points = []
@@ -87,7 +88,8 @@ class LiDARInstanceLines(object):
         """
         return torch.Tensor([N,4]), in xmin, ymin, xmax, ymax form
         """
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 4), dtype=torch.float32)
         instance_bbox_list = []
         for instance in self.instance_list:
             # bounds is bbox: [xmin, ymin, xmax, ymax]
@@ -108,7 +110,8 @@ class LiDARInstanceLines(object):
         return torch.Tensor([N,fixed_num,2]), in xmin, ymin, xmax, ymax form
             N means the num of instances
         """
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, self.fixed_num, 2), dtype=torch.float32)
         instance_points_list = []
         for instance in self.instance_list:
             distances = np.linspace(0, instance.length, self.fixed_num)
@@ -128,7 +131,8 @@ class LiDARInstanceLines(object):
         return torch.Tensor([N,fixed_num,2]), in xmin, ymin, xmax, ymax form
             N means the num of instances
         """
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 1, self.fixed_num, 2), dtype=torch.float32)
         instance_points_list = []
         for instance in self.instance_list:
             distances = np.linspace(0, instance.length, self.fixed_num)
@@ -149,7 +153,8 @@ class LiDARInstanceLines(object):
         return torch.Tensor([N,fixed_num,2]), in xmin, ymin, xmax, ymax form
             N means the num of instances
         """
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, self.fixed_num, 2), dtype=torch.float32)
         instance_points_list = []
         for instance in self.instance_list:
             # distances = np.linspace(0, instance.length, self.fixed_num)
@@ -173,6 +178,8 @@ class LiDARInstanceLines(object):
         """
         return  [instances_num, num_shifts, fixed_num, 2]
         """
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 1, self.fixed_num, 2), dtype=torch.float32)
         fixed_num_sampled_points = self.fixed_num_sampled_points
         instances_list = []
         is_poly = False
@@ -211,6 +218,8 @@ class LiDARInstanceLines(object):
         """
         return  [instances_num, num_shifts, fixed_num, 2]
         """
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 1, self.fixed_num, 2), dtype=torch.float32)
         fixed_num_sampled_points = self.fixed_num_sampled_points
         instances_list = []
         is_poly = False
@@ -258,7 +267,8 @@ class LiDARInstanceLines(object):
         """
         return  [instances_num, num_shifts, fixed_num, 2]
         """
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 1, self.fixed_num, 2), dtype=torch.float32)
         instances_list = []
         for instance in self.instance_list:
             distances = np.linspace(0, instance.length, self.fixed_num)
@@ -287,7 +297,7 @@ class LiDARInstanceLines(object):
                 flip_sampled_points = np.flip(sampled_points, axis=0)
                 shift_pts_list.append(sampled_points)
                 shift_pts_list.append(flip_sampled_points)
-            
+
             multi_shifts_pts = np.stack(shift_pts_list,axis=0)
             shifts_num,_,_ = multi_shifts_pts.shape
 
@@ -316,7 +326,8 @@ class LiDARInstanceLines(object):
         """
         return  [instances_num, num_shifts, fixed_num, 2]
         """
-        assert len(self.instance_list) != 0
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 1, self.fixed_num, 2), dtype=torch.float32)
         instances_list = []
         for instance in self.instance_list:
             distances = np.linspace(0, instance.length, self.fixed_num)
@@ -385,6 +396,8 @@ class LiDARInstanceLines(object):
         """
         return  [instances_num, num_shifts, fixed_num, 2]
         """
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 1, self.fixed_num, 2), dtype=torch.float32)
         fixed_num_sampled_points = self.fixed_num_sampled_points
         instances_list = []
         is_poly = False
@@ -434,6 +447,8 @@ class LiDARInstanceLines(object):
         """
         return  [instances_num, num_shifts, fixed_num, 2]
         """
+        if len(self.instance_list) == 0:
+            return torch.zeros((0, 1, self.fixed_num, 2), dtype=torch.float32)
         fixed_num_sampled_points = self.fixed_num_sampled_points_torch
         instances_list = []
         is_poly = False
