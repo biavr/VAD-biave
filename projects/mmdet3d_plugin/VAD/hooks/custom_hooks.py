@@ -21,7 +21,7 @@ class CustomSetEpochInfoHook(Hook):
     def before_train_epoch(self, runner):
         epoch = runner.epoch
         model = runner.model
-        if is_module_wrapper(model):
+        if is_model_wrapper(model):
             model = model.module
         model.set_epoch(epoch)
 

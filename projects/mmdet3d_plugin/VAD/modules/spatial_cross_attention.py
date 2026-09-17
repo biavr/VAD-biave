@@ -263,10 +263,11 @@ class MSDeformableAttention3D(BaseModule):
 
     def init_weights(self):
         """Default initialization for Parameters of Module."""
+        device = self.sampling_offsets.weight.device
         constant_init(self.sampling_offsets, 0.)
         thetas = torch.arange(
             self.num_heads,
-            dtype=torch.float32) * (2.0 * math.pi / self.num_heads)
+            dtype=torch.float32, device=device) * (2.0 * math.pi / self.num_heads)
         grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
         grid_init = (grid_init /
                      grid_init.abs().max(-1, keepdim=True)[0]).view(
@@ -282,61 +283,43 @@ class MSDeformableAttention3D(BaseModule):
         self._is_init = True
 
     def forward(self,
-                query,
-                key=None,
-                value=None,
-                identity=None,
-                query_pos=None,
-                key_padding_mask=None,
-                reference_points=None,
-                spatial_shapes=None,
-                level_start_index=None,
-                **kwargs):
+            query,
+            key=None,
+            value=None,
+            identity=None,
+            query_pos=None,
+            key_padding_mask=None,
+            reference_points=None,
+            spatial_shapes=None,
+            level_start_index=None,
+            **kwargs):
         """Forward Function of MultiScaleDeformAttention.
+
         Args:
             query (Tensor): Query of Transformer with shape
-                ( bs, num_query, embed_dims).
-            key (Tensor): The key tensor with shape
-                `(bs, num_key,  embed_dims)`.
-            value (Tensor): The value tensor with shape
-                `(bs, num_key,  embed_dims)`.
-            identity (Tensor): The tensor used for addition, with the
-                same shape as `query`. Default None. If None,
-                `query` will be used.
-            query_pos (Tensor): The positional encoding for `query`.
-                Default: None.
-            key_pos (Tensor): The positional encoding for `key`. Default
-                None.
-            reference_points (Tensor):  The normalized reference
-                points with shape (bs, num_query, num_levels, 2),
-                all elements is range in [0, 1], top-left (0,0),
-                bottom-right (1, 1), including padding area.
-                or (N, Length_{query}, num_levels, 4), add
-                additional two dimensions is (w, h) to
-                form reference boxes.
-            key_padding_mask (Tensor): ByteTensor for `query`, with
-                shape [bs, num_key].
-            spatial_shapes (Tensor): Spatial shape of features in
-                different levels. With shape (num_levels, 2),
-                last dimension represents (h, w).
-            level_start_index (Tensor): The start index of each level.
-                A tensor has shape ``(num_levels, )`` and can be represented
-                as [0, h_0*w_0, h_0*w_0+h_1*w_1, ...].
+                (bs, num_query, embed_dims) if self.batch_first,
+                else (num_query, bs, embed_dims).
+            key (Tensor): Unused -- kept for API compatibility with other
+                attention modules built through the same registry.
+            value (Tensor): The value tensor, same layout convention as
+                `query`. Defaults to `query` if not given.
+            identity (Tensor): Tensor used for the residual addition, same
+                shape as `query`. Defaults to `query` if not given.
+            query_pos (Tensor): Positional encoding for `query`. Must
+                already match `query`'s incoming layout -- added before
+                any layout conversion happens.
+            key_padding_mask (Tensor): ByteTensor for `query`, shape
+                [bs, num_key].
+            reference_points (Tensor): Normalized reference points, shape
+                (bs, num_query, num_levels, 2) or (..., 4).
+            spatial_shapes (Tensor): Spatial shape of features per level,
+                shape (num_levels, 2), each row (h, w).
+            level_start_index (Tensor): Start index of each level, shape
+                (num_levels,).
+
         Returns:
-             Tensor: forwarded results with shape [num_query, bs, embed_dims].
+            Tensor: forwarded results, same shape/layout as `identity`.
         """
-        # 1. STANDARDIZATION BLOCK:
-        # If query is [300, 4, 256], it's Sequence-First.
-        # If query is [4, 300, 256], it's Batch-First.
-        # LayerNorm wants [4, 300, 256], but THIS module math needs to know which is which.
-        if query.dim() == 3:
-            # If query is [300, 4, 256], it is Sequence-First. Standardize to Batch-First.
-            if query.shape[0] == 300: 
-                query = query.permute(1, 0, 2)
-            # If query is [4, 300, 256], it is already Batch-First.
-        bs, num_query, _ = query.shape
-        # ---------------------------
-        # print(">>> scr: query shape:", query.shape)
         if value is None:
             value = query
         if identity is None:
@@ -344,111 +327,80 @@ class MSDeformableAttention3D(BaseModule):
         if query_pos is not None:
             query = query + query_pos
 
-        if not self.batch_first and not kwargs.get('batch_first', False):
-            # print(">>> scr: batch_first is False, permuting query and value")
-            # change to (bs, num_query ,embed_dims)
+        # Normalize to batch-first (bs, seq, embed_dims) using self.batch_first
+        # as the single source of truth for this instance -- no shape-sniffing.
+        if not self.batch_first:
             query = query.permute(1, 0, 2)
             value = value.permute(1, 0, 2)
-        if not self.batch_first:
-            value = value.permute(1, 0, 2)
-        # print(">>> scr: query shape after batch first check:", query.shape)
+
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
-        # assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
+        assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
 
         value = self.value_proj(value)
         if key_padding_mask is not None:
             value = value.masked_fill(key_padding_mask[..., None], 0.0)
         value = value.view(bs, num_value, self.num_heads, -1)
-        # 2. FIXED VIEW CALL:
-        # Use the dynamically detected bs and num_query
+
         sampling_offsets = self.sampling_offsets(query).view(
             bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
-        
         attention_weights = self.attention_weights(query).view(
             bs, num_query, self.num_heads, self.num_levels * self.num_points)
-
         attention_weights = attention_weights.softmax(-1)
-
-        attention_weights = attention_weights.view(bs, num_query,
-                                                   self.num_heads,
-                                                   self.num_levels,
-                                                   self.num_points)
+        attention_weights = attention_weights.view(
+            bs, num_query, self.num_heads, self.num_levels, self.num_points)
 
         if reference_points.shape[-1] == 2:
             """
-            For each BEV query, it owns `num_Z_anchors` in 3D space that having different heights.
-            After proejcting, each BEV query has `num_Z_anchors` reference points in each 2D image.
-            For each referent point, we sample `num_points` sampling points.
-            For `num_Z_anchors` reference points,  it has overall `num_points * num_Z_anchors` sampling points.
+            For each BEV query, it owns `num_Z_anchors` in 3D space at
+            different heights. After projecting, each BEV query has
+            `num_Z_anchors` reference points in each 2D image. For each
+            reference point, we sample `num_points` sampling points, so
+            overall each query has `num_points * num_Z_anchors` samples.
             """
             offset_normalizer = torch.stack(
                 [spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
 
-            bs, num_query, num_Z_anchors, xy = reference_points.shape
-            reference_points = reference_points[:, :, None, None, None, :, :]
+            _, _, num_Z_anchors, _ = reference_points.shape
+            reference_points_reshaped = reference_points[:, :, None, None, None, :, :]
             sampling_offsets = sampling_offsets / \
                 offset_normalizer[None, None, None, :, None, :]
-            bs, num_query, num_heads, num_levels, num_all_points, xy = sampling_offsets.shape
+            _, _, _, _, num_all_points, xy = sampling_offsets.shape
             sampling_offsets = sampling_offsets.view(
-                bs, num_query, num_heads, num_levels, num_all_points // num_Z_anchors, num_Z_anchors, xy)
-            sampling_locations = reference_points + sampling_offsets
-            bs, num_query, num_heads, num_levels, num_points, num_Z_anchors, xy = sampling_locations.shape
+                bs, num_query, self.num_heads, self.num_levels,
+                num_all_points // num_Z_anchors, num_Z_anchors, xy)
+            sampling_locations = reference_points_reshaped + sampling_offsets
+            _, _, _, _, num_points, num_Z_anchors, xy = sampling_locations.shape
             assert num_all_points == num_points * num_Z_anchors
-
             sampling_locations = sampling_locations.view(
-                bs, num_query, num_heads, num_levels, num_all_points, xy)
+                bs, num_query, self.num_heads, self.num_levels, num_all_points, xy)
 
         elif reference_points.shape[-1] == 4:
-            assert False
+            raise NotImplementedError(
+                '4D reference points are not supported here -- only the '
+                '2D BEV-anchor path is implemented.')
         else:
             raise ValueError(
-                f'Last dim of reference_points must be'
-                f' 2 or 4, but get {reference_points.shape[-1]} instead.')
+                f'Last dim of reference_points must be 2 or 4, '
+                f'but got {reference_points.shape[-1]} instead.')
 
-        #  sampling_locations.shape: bs, num_query, num_heads, num_levels, num_all_points, 2
-        #  attention_weights.shape: bs, num_query, num_heads, num_levels, num_all_points
-        #
-
+        # sampling_locations: (bs, num_query, num_heads, num_levels, num_all_points, 2)
+        # attention_weights:  (bs, num_query, num_heads, num_levels, num_all_points)
         if torch.cuda.is_available() and value.is_cuda:
-            if value.dtype == torch.float16:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            else:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            output = MultiScaleDeformableAttnFunction.apply(
+            # (Both branches of the original code selected the fp32 kernel --
+            # collapsed here since there was never actually a fp16 path.)
+            output = MultiScaleDeformableAttnFunction_fp32.apply(
                 value, spatial_shapes, level_start_index, sampling_locations,
                 attention_weights, self.im2col_step)
         else:
             output = multi_scale_deformable_attn_pytorch(
                 value, spatial_shapes, sampling_locations, attention_weights)
-            
-        # if output.dim() == 4:
-        #     output = output.reshape(bs, num_query, self.embed_dims)
-        # elif output.dim() == 2:
-        #     # If it came out flattened [bs * num_query, embed_dims]
-        #     output = output.view(bs, num_query, self.embed_dims)
-        bs_total = output.shape[0]
-        output = output.reshape(bs_total, -1, self.embed_dims)
-        # 2. Now apply the linear projection
-        if self.output_proj is not None:
-            # DEBUG: Uncomment this to verify shape
-            # print(">>> scr: output shape before output_proj:", output.shape)
-            output = self.output_proj(output)
-            
-        # 3. Handle identity and batch_first
+
+        output = output.reshape(bs, num_query, self.embed_dims)
+        output = self.output_proj(output)
+
+        # Convert back to the caller's original layout convention.
         if not self.batch_first:
             output = output.permute(1, 0, 2)
-        
-        if identity.dim() == 3 and identity.shape[0] != bs:
-             identity = identity.permute(1, 0, 2)
-        
-        # Ensure output is [Batch, Query, Embed_Dims]
-        if output.dim() == 3 and output.shape[0] != bs:
-             output = output.permute(1, 0, 2)
-
-        # DEBUG: Final shape verification
-        if output.shape != identity.shape:
-            # If they still don't match, force align to output shape
-            identity = identity.view(output.shape)
 
         return self.dropout(output) + identity

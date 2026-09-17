@@ -57,71 +57,6 @@ class DetectionTransformerDecoder(TransformerLayerSequence):
         self.return_intermediate = return_intermediate
         self.fp16_enabled = False
 
-    # def forward(self,
-    #             query,
-    #             *args,
-    #             reference_points=None,
-    #             reg_branches=None,
-    #             key_padding_mask=None,
-    #             **kwargs):
-    #     """Forward function for `Detr3DTransformerDecoder`.
-    #     Args:
-    #         query (Tensor): Input query with shape
-    #             `(num_query, bs, embed_dims)`.
-    #         reference_points (Tensor): The reference
-    #             points of offset. has shape
-    #             (bs, num_query, 4) when as_two_stage,
-    #             otherwise has shape ((bs, num_query, 2).
-    #         reg_branch: (obj:`nn.ModuleList`): Used for
-    #             refining the regression results. Only would
-    #             be passed when with_box_refine is True,
-    #             otherwise would be passed a `None`.
-    #     Returns:
-    #         Tensor: Results with shape [1, num_query, bs, embed_dims] when
-    #             return_intermediate is `False`, otherwise it has shape
-    #             [num_layers, num_query, bs, embed_dims].
-    #     """
-    #     output = query
-    #     intermediate = []
-    #     intermediate_reference_points = []
-    #     for lid, layer in enumerate(self.layers):
-    #         reference_points_input = reference_points[..., :2].unsqueeze(
-    #             2)  # BS NUM_QUERY NUM_LEVEL 2
-    #         # print(f"args: {args}, kwargs: {kwargs.keys()}")
-    #         output = layer(
-    #             output,
-    #             *args,
-    #             reference_points=reference_points_input,
-    #             key_padding_mask=key_padding_mask,
-    #             **kwargs)
-    #         output = output.permute(1, 0, 2)
-
-    #         if reg_branches is not None:
-    #             tmp = reg_branches[lid](output)
-
-    #             assert reference_points.shape[-1] == 3
-
-    #             new_reference_points = torch.zeros_like(reference_points)
-    #             new_reference_points[..., :2] = tmp[
-    #                 ..., :2] + inverse_sigmoid(reference_points[..., :2])
-    #             new_reference_points[..., 2:3] = tmp[
-    #                 ..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
-
-    #             new_reference_points = new_reference_points.sigmoid()
-
-    #             reference_points = new_reference_points.detach()
-
-    #         output = output.permute(1, 0, 2)
-    #         if self.return_intermediate:
-    #             intermediate.append(output)
-    #             intermediate_reference_points.append(reference_points)
-
-    #     if self.return_intermediate:
-    #         return torch.stack(intermediate), torch.stack(
-    #             intermediate_reference_points)
-
-    #     return output, reference_points
-
     def forward(self,
                 query,
                 *args,
@@ -129,70 +64,61 @@ class DetectionTransformerDecoder(TransformerLayerSequence):
                 reg_branches=None,
                 key_padding_mask=None,
                 **kwargs):
-        
-        # 1. Start with Batch-First to satisfy the initial LayerNorm
-        if query.dim() == 3 and query.shape[0] == 300:
-            query = query.permute(1, 0, 2)
-            
-        if 'query_pos' in kwargs and kwargs['query_pos'] is not None:
-            if kwargs['query_pos'].shape[0] == 300:
-                kwargs['query_pos'] = kwargs['query_pos'].permute(1, 0, 2)
-
+        """Forward function for `Detr3DTransformerDecoder`.
+        Args:
+            query (Tensor): Input query with shape
+                `(num_query, bs, embed_dims)`.
+            reference_points (Tensor): The reference
+                points of offset. has shape
+                (bs, num_query, 4) when as_two_stage,
+                otherwise has shape ((bs, num_query, 2).
+            reg_branch: (obj:`nn.ModuleList`): Used for
+                refining the regression results. Only would
+                be passed when with_box_refine is True,
+                otherwise would be passed a `None`.
+        Returns:
+            Tensor: Results with shape [1, num_query, bs, embed_dims] when
+                return_intermediate is `False`, otherwise it has shape
+                [num_layers, num_query, bs, embed_dims].
+        """
         output = query
         intermediate = []
         intermediate_reference_points = []
-        
         for lid, layer in enumerate(self.layers):
-            # 2. Reference points MUST be 4D: [Batch, Queries, Anchors, XY]
-            reference_points_input = reference_points[..., :2].unsqueeze(2) 
-            kwargs['reference_points'] = reference_points_input
-            
-            # Explicitly tell internal modules that we are passing Batch-First tensors
-            kwargs['batch_first'] = True 
-
-            # 3. Call the Layer Wrapper (Accepts and returns Batch-First [4, 300, 256])
+            reference_points_input = reference_points[..., :2].unsqueeze(2)
             output = layer(
                 output,
                 *args,
+                reference_points=reference_points_input,
                 key_padding_mask=key_padding_mask,
                 **kwargs)
-            
-            # 4. Box Regression refinement
+            output = output.permute(1, 0, 2)
+
             if reg_branches is not None:
-                # Pass Batch-First output to get a Batch-First tmp tensor [4, 300, channels]
-                # This explicitly avoids the [300, 4, 1] vs [4, 300, 1] expansion error
-                tmp = reg_branches[lid](output)  
-                
-                is_3d = (reference_points.shape[-1] == 3)
-                
-                # Allocate a 3D tensor template [Batch, Queries, 3]
-                if is_3d:
-                    new_reference_points = torch.zeros_like(reference_points)
-                    # Refine Z coordinate using VAD tracking output array layout (index 4)
-                    new_reference_points[..., 2:3] = tmp[..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
-                else:
-                    # If incoming is 2D [Batch, Queries, 2], construct 3D by adding a Z layer
-                    bs_dim, num_q_dim = reference_points.shape[0], reference_points.shape[1]
-                    new_reference_points = reference_points.new_zeros((bs_dim, num_q_dim, 3))
-                    # Initialize Z axis coordinate inside sigmoid space (0.5 results in 0.0 after translation)
-                    new_reference_points[..., 2:3] = tmp[..., 4:5] + inverse_sigmoid(reference_points.new_tensor([0.5]))
+                tmp = reg_branches[lid](output)
 
-                # Refine X and Y coordinates (common to both 2D and 3D cases)
-                new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points[..., :2])
-                
-                # Convert back through sigmoid and detach from the tracking graph
-                reference_points = new_reference_points.sigmoid().detach()
+                assert reference_points.shape[-1] == 3
 
+                new_reference_points = torch.zeros_like(reference_points)
+                new_reference_points[..., :2] = tmp[
+                    ..., :2] + inverse_sigmoid(reference_points[..., :2])
+                new_reference_points[..., 2:3] = tmp[
+                    ..., 4:5] + inverse_sigmoid(reference_points[..., 2:3])
+
+                new_reference_points = new_reference_points.sigmoid()
+
+                reference_points = new_reference_points.detach()
+
+            output = output.permute(1, 0, 2)
             if self.return_intermediate:
-                # Store Sequence-First format as required by the final VAD Head loss collection
-                intermediate.append(output.permute(1, 0, 2))
+                intermediate.append(output)
                 intermediate_reference_points.append(reference_points)
 
         if self.return_intermediate:
-            return torch.stack(intermediate), torch.stack(intermediate_reference_points)
+            return torch.stack(intermediate), torch.stack(
+                intermediate_reference_points)
 
-        # Return Sequence-First output format to match VAD Head predictions
-        return output.permute(1, 0, 2), reference_points
+        return output, reference_points
 
 
 @MODELS.register_module()
@@ -274,10 +200,11 @@ class CustomMSDeformableAttention(BaseModule):
 
     def init_weights(self):
         """Default initialization for Parameters of Module."""
+        device = self.sampling_offsets.weight.device
         constant_init(self.sampling_offsets, 0.)
         thetas = torch.arange(
             self.num_heads,
-            dtype=torch.float32) * (2.0 * math.pi / self.num_heads)
+            dtype=torch.float32, device=device) * (2.0 * math.pi / self.num_heads)
         grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
         grid_init = (grid_init /
                      grid_init.abs().max(-1, keepdim=True)[0]).view(
@@ -362,7 +289,6 @@ class CustomMSDeformableAttention(BaseModule):
         if key_padding_mask is not None:
             value = value.masked_fill(key_padding_mask[..., None], 0.0)
         value = value.view(bs, num_value, self.num_heads, -1)
-
         sampling_offsets = self.sampling_offsets(query).view(
             bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
         attention_weights = self.attention_weights(query).view(

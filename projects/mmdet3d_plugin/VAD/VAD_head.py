@@ -346,7 +346,10 @@ class VADHead(DETRHead):
 
             self.map_assigner = build_assigner(map_assigner)
             # DETR sampling=False, so use PseudoSampler
-            sampler_cfg = dict(type='PseudoSampler')
+            # NOTE: must use mmdet's 2D PseudoSampler (expects `.bboxes`), not
+            # mmdet3d's, which expects `.bboxes_3d` and would otherwise be
+            # picked up by the `default_scope='mmdet3d'` config setting.
+            sampler_cfg = dict(type='mmdet.PseudoSampler')
             self.map_sampler = build_sampler(sampler_cfg, context=self)
         
         self.loss_traj = MODELS.build(loss_traj)

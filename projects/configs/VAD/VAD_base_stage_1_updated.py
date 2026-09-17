@@ -1,9 +1,3 @@
-# ==============================================================================
-# VAD Base Stage-1 MMEngine Modern Configuration
-# Optimized for high-fidelity perception backbone training on nuScenes full trainval
-# ==============================================================================
-
-# Inherit baseline environment components safely from modern configurations
 _base_ = [
     '../datasets/custom_nus-3d.py',
     '../_base_/default_runtime.py'
@@ -14,76 +8,106 @@ plugin_dir = 'projects/mmdet3d_plugin/'
 default_scope = 'mmdet3d'
 
 custom_imports = dict(
-    imports=['projects.mmdet3d_plugin',
-             'mmdet.models.layers.transformer',
+    imports=['mmdet.models.layers.transformer',
              'mmdet.models.layers',
-             'mmdet3d', 
+             'mmdet3d',
              'mmdet3d.models.data_preprocessors',
              'mmdet.models.losses',
+             'projects.mmdet3d_plugin',
              'projects.mmdet3d_plugin.core.bbox.coders.fut_nms_free_coder',
              'projects.mmdet3d_plugin.core.bbox.coders.map_nms_free_coder',
-             'projects.mmdet3d_plugin.datasets.pipelines', 
-             ], 
+             'projects.mmdet3d_plugin.datasets.pipelines',
+             ],
     allow_failed_imports=False
 )
 
 point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
 voxel_size = [0.15, 0.15, 4]
-img_norm_cfg = dict(
-    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
 class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 num_classes = len(class_names)
-
-_dim_ = 256
-_pos_dim_ = _dim_//2
-_ffn_dim_ = _dim_*2
-_num_levels_ = 4
 map_classes = ['divider', 'ped_crossing', 'boundary']
 map_num_classes = len(map_classes)
+map_fixed_ptsnum_per_line = 20  # must match map_num_pts_per_gt_vec below
+
+_dim_ = 256
+_pos_dim_ = _dim_ // 2
+_ffn_dim_ = _dim_ * 2
+_num_levels_ = 4
 bev_h_ = 200
 bev_w_ = 200
-queue_length = 4 # each sequence contains `queue_length` frames.
+queue_length = 4
 total_epochs = 24
 
 data_root = '/workspace/datasets/nuscenes/v1.0-trainval/'
 
 model = dict(
-    type='VAD', # Central model driver pointing to projects/mmdet3d_plugin/
+    type='VAD',
+    data_preprocessor=dict(
+        type='mmdet3d.Det3DDataPreprocessor',
+        mean=[123.675, 116.28, 103.53],
+        std=[58.395, 57.12, 57.375],
+        bgr_to_rgb=True,
+        pad_size_divisor=32),
     use_grid_mask=True,
     video_test_mode=True,
-    pretrained=dict(img='open-mmlab://resnet101'),
     img_backbone=dict(
-        type='ResNet',
+        type='mmdet.ResNet',
         depth=101,
         num_stages=4,
         out_indices=(1, 2, 3),
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
-        style='pytorch'),
+        style='pytorch',
+        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet101')),
     img_neck=dict(
-        type='FPN',
+        type='mmdet.FPN',
         in_channels=[512, 1024, 2048],
-        out_channels=256,
+        out_channels=_dim_,
         start_level=0,
         add_extra_convs='on_output',
-        num_outs=4,
+        num_outs=_num_levels_,
         relu_before_extra_convs=True),
     pts_bbox_head=dict(
         type='VADHead',
         num_query=900,
         num_classes=num_classes,
-        in_channels=256,
+        in_channels=_dim_,
+        embed_dims=_dim_,
+        bev_h=bev_h_,
+        bev_w=bev_w_,
+
+        map_num_vec=100,
+        map_num_classes=map_num_classes,
+        map_num_pts_per_vec=map_fixed_ptsnum_per_line,
+        map_num_pts_per_gt_vec=map_fixed_ptsnum_per_line,
+        map_code_size=2,
+        valid_fut_ts=6,
+        traj_num_cls=6,
+        fut_mode=6,
+        fut_ts=6,
+
         sync_cls_avg_factor=True,
         with_box_refine=True,
         as_two_stage=False,
+        use_pe=True,
+        score_thresh=0.4,
+        map_query_embed_type='instance_pts',
+        map_transform_method='minmax',
+
         transformer=dict(
             type='VADPerceptionTransformer',
-            num_feature_levels=4,
+            map_num_vec=100,
+            map_num_pts_per_vec=map_fixed_ptsnum_per_line,
+            rotate_prev_bev=True,
+            use_shift=True,
+            use_can_bus=True,
+            embed_dims=_dim_,
+            num_feature_levels=_num_levels_,
             num_cams=6,
             two_stage_num_proposals=900,
             encoder=dict(
@@ -96,18 +120,19 @@ model = dict(
                     attn_cfgs=[
                         dict(
                             type='TemporalSelfAttention',
-                            embed_dims=256,
+                            embed_dims=_dim_,
                             num_levels=1),
                         dict(
                             type='SpatialCrossAttention',
                             pc_range=point_cloud_range,
                             deformable_attention=dict(
                                 type='MSDeformableAttention3D',
-                                embed_dims=256,
-                                num_levels=1),
-                            embed_dims=256)
+                                embed_dims=_dim_,
+                                num_points=8,
+                                num_levels=_num_levels_),
+                            embed_dims=_dim_)
                     ],
-                    feedforward_channels=512,
+                    feedforward_channels=_ffn_dim_,
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm'))),
             decoder=dict(
@@ -116,17 +141,83 @@ model = dict(
                 return_intermediate=True,
                 transformerlayers=dict(
                     type='BaseTransformerLayer',
+                    # batch_first=True,  
                     attn_cfgs=[
                         dict(
                             type='MultiheadAttention',
-                            embed_dims=256,
+                            embed_dims=_dim_,
                             num_heads=8,
                             dropout=0.1),
-                        dict(type='MultiheadAttention', embed_dims=256, num_heads=8, dropout=0.1),
+                        dict(
+                            type='MSDeformableAttention3D',
+                            embed_dims=_dim_,
+                            num_levels=1),
                     ],
-                    feedforward_channels=512,
+                    feedforward_channels=_ffn_dim_,
+                    ffn_dropout=0.1,
+                    operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm'))),
+            map_decoder=dict(
+                type='MapDetectionTransformerDecoder',
+                num_layers=6,
+                return_intermediate=True,
+                transformerlayers=dict(
+                    type='BaseTransformerLayer',
+                    attn_cfgs=[
+                        dict(
+                            type='MultiheadAttention',
+                            embed_dims=_dim_,
+                            num_heads=8,
+                            dropout=0.1),
+                        dict(
+                            type='CustomMSDeformableAttention',
+                            embed_dims=_dim_,
+                            num_levels=1)
+                    ],
+                    feedforward_channels=_ffn_dim_,
                     ffn_dropout=0.1,
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm')))),
+
+        motion_decoder=dict(
+            type='CustomTransformerDecoder',
+            num_layers=1,
+            return_intermediate=False,
+            transformerlayers=dict(
+                type='BaseTransformerLayer',
+                attn_cfgs=[dict(type='MultiheadAttention', embed_dims=_dim_, num_heads=8, dropout=0.1)],
+                feedforward_channels=_ffn_dim_,
+                ffn_dropout=0.1,
+                operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
+        motion_map_decoder=dict(
+            type='CustomTransformerDecoder',
+            num_layers=1,
+            return_intermediate=False,
+            transformerlayers=dict(
+                type='BaseTransformerLayer',
+                attn_cfgs=[dict(type='MultiheadAttention', embed_dims=_dim_, num_heads=8, dropout=0.1)],
+                feedforward_channels=_ffn_dim_,
+                ffn_dropout=0.1,
+                operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
+        ego_agent_decoder=dict(
+            type='CustomTransformerDecoder',
+            num_layers=1,
+            return_intermediate=False,
+            transformerlayers=dict(
+                type='BaseTransformerLayer',
+                attn_cfgs=[dict(type='MultiheadAttention', embed_dims=_dim_, num_heads=8, dropout=0.1)],
+                feedforward_channels=_ffn_dim_,
+                ffn_dropout=0.1,
+                operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
+        ego_map_decoder=dict(
+            type='CustomTransformerDecoder',
+            num_layers=1,
+            return_intermediate=False,
+            transformerlayers=dict(
+                type='BaseTransformerLayer',
+                attn_cfgs=[dict(type='MultiheadAttention', embed_dims=_dim_, num_heads=8, dropout=0.1)],
+                feedforward_channels=_ffn_dim_,
+                ffn_dropout=0.1,
+                operation_order=('cross_attn', 'norm', 'ffn', 'norm'))),
+
         bbox_coder=dict(
             type='projects.mmdet3d_plugin.core.bbox.coders.fut_nms_free_coder.CustomNMSFreeCoder',
             post_center_range=[-20, -35, -10.0, 20, 35, 10.0],
@@ -141,73 +232,74 @@ model = dict(
             max_num=50,
             voxel_size=voxel_size,
             num_classes=map_num_classes),
-         positional_encoding=dict(
+        positional_encoding=dict(
             type='LearnedPositionalEncoding',
             num_feats=_pos_dim_,
             row_num_embed=bev_h_,
-            col_num_embed=bev_w_,
-            ),
-        loss_cls=dict(
-            type='mmdet.FocalLoss',
-            use_sigmoid=True,
-            gamma=2.0,
-            alpha=0.25,
-            loss_weight=2.0),
+            col_num_embed=bev_w_),
+
+        loss_cls=dict(type='mmdet.FocalLoss', use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0),
         loss_bbox=dict(type='mmdet.L1Loss', loss_weight=0.25),
-        loss_iou=dict(type='mmdet.GIOULoss', loss_weight=0.0),
-        
-        # Planning losses are muted or decoupled to anchor backbone training cleanly
-        loss_map_cls=dict(type='mmdet.FocalLoss', use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=0.0),
-        loss_map_reg=dict(type='mmdet.L1Loss', loss_weight=0.0),
-        loss_traj_cls=dict(type='mmdet.FocalLoss', use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=0.0),
-        loss_traj_reg=dict(type='mmdet.L1Loss', loss_weight=0.0)),
-    
-    # Model Model Config Training Parameters Tuning Mapping
+        loss_iou=dict(type='mmdet.GIoULoss', loss_weight=0.0),
+
+        # Stage 1 = Perception & Prediction (detection + map + motion trained,
+        # planning muted). Flip these two back to 0.0 if you want detection-only.
+        loss_traj=dict(type='mmdet.L1Loss', loss_weight=0.2),
+        loss_traj_cls=dict(type='mmdet.FocalLoss', use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=0.2),
+        loss_map_cls=dict(type='mmdet.FocalLoss', use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0),
+        loss_map_bbox=dict(type='mmdet.L1Loss', loss_weight=0.0),
+        loss_map_iou=dict(type='mmdet.GIoULoss', loss_weight=0.0),
+        loss_map_pts=dict(type='PtsL1Loss', loss_weight=1.0),
+
+        # Planning stays muted -- this is stage 2's job.
+        loss_plan_reg=dict(type='mmdet.L1Loss', loss_weight=0.0),
+        loss_plan_bound=dict(type='PlanMapBoundLoss', loss_weight=0.0, dis_thresh=1.0),
+        loss_plan_col=dict(type='PlanCollisionLoss', loss_weight=0.0),
+        loss_plan_dir=dict(type='PlanMapDirectionLoss', loss_weight=0.0),
+    ),
     train_cfg=dict(
         pts=dict(
             grid_size=[512, 512, 1],
             voxel_size=voxel_size,
+            point_cloud_range=point_cloud_range,
             out_size_factor=8,
             assigner=dict(
-                type='HungarianAssigner3D',
+                type='mmdet.HungarianAssigner3D',
                 cls_cost=dict(type='mmdet.FocalLossCost', weight=2.0),
-                reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
-                iou_cost=dict(type='mmdet.IoUReviewCost', weight=0.0)))))
+                reg_cost=dict(type='mmdet.BBox3DL1Cost', weight=0.25),
+                iou_cost=dict(type='mmdet.IoUCost', weight=0.0),
+                pc_range=point_cloud_range),
+            map_assigner=dict(
+                type='mmdet.MapHungarianAssigner3D',
+                cls_cost=dict(type='mmdet.FocalLossCost', weight=2.0),
+                reg_cost=dict(type='mmdet.BBox3DL1Cost', weight=0.0),
+                iou_cost=dict(type='mmdet.IoUCost', iou_mode='giou', weight=0.0),
+                pts_cost=dict(type='mmdet.OrderedPtsL1Cost', weight=1.0),
+                pc_range=point_cloud_range))),
+)
 
 train_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='PhotoMetricDistortionMultiViewImage'),
-    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
-    dict(type='CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
-    dict(type='CustomObjectNameFilter', classes=class_names),
-    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-    dict(type='RandomScaleImageMultiViewImage', scales=[0.8]),
-    dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_ego=True),
-    dict(type='CustomCollect3D',\
-         keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'ego_his_trajs',
-               'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels'])
+    dict(type='mmdet3d.LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='projects.mmdet3d_plugin.datasets.pipelines.PhotoMetricDistortionMultiViewImage'),
+    dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
+    dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomObjectNameFilter', classes=class_names),
+    dict(type='projects.mmdet3d_plugin.datasets.pipelines.RandomScaleImageMultiViewImage', scales=[0.8]),
+    dict(type='mmdet3d.Pack3DDetInputs',
+         keys=['img', 'gt_bboxes_3d', 'gt_labels_3d'],
+         meta_keys=[
+             'lidar2img', 'can_bus', 'timestamp', 'sample_idx', 'img_metas',
+             'gt_attr_labels',
+             'gt_ego_his_trajs', 'gt_ego_fut_trajs', 'gt_ego_fut_masks',
+             'gt_ego_fut_cmd', 'gt_ego_lcf_feat',
+             'box_mode_3d', 'box_type_3d', 'point_cloud_range'
+         ]),
 ]
 
-val_pipeline = [
-    dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-    dict(type='PadMultiViewImage', size_divisor=32),
-    dict(
-        type='CustomDefaultFormatBundle3D',
-        class_names=class_names,
-        with_label=False,
-        with_ego=False),
-    dict(type='CustomCollect3D', keys=['img'])
+test_pipeline = [
+    dict(type='mmdet3d.LoadMultiViewImageFromFiles', to_float32=True),
+    dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
 ]
-
-# val_pipeline = [
-#     dict(type='mmdet3d.LoadPointsFromFile', coord_type='LIDAR', load_dim=5, use_dim=5),
-#     dict(type='mmdet3d.LoadPointsFromMultiViewImages', replace_img_with_black=False),
-#     dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True),
-#     dict(type='mmengine.Pack3DDetInputs', keys=['img', 'gt_bboxes_3d', 'gt_labels_3d'])
-# ]
-
 
 train_dataloader = dict(
     batch_size=1,
@@ -219,16 +311,15 @@ train_dataloader = dict(
         data_root=data_root,
         ann_file=data_root + 'vad_nuscenes_infos_temporal_train.pkl',
         pipeline=train_pipeline,
-        # --- NEW: Wrap classes in metainfo ---
-        metainfo=dict(classes=class_names), 
-        filter_empty_gt=False, # Ensure this is False for now
+        metainfo=dict(classes=class_names),
+        filter_empty_gt=False,
         modality=dict(use_lidar=False, use_camera=True),
         test_mode=False,
-        # Keep these here, but we will "pop" them in the Python code
         bev_size=(bev_h_, bev_w_),
         pc_range=point_cloud_range,
         queue_length=queue_length,
         map_classes=map_classes,
+        map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_line,
         serialize_data=False,)
     )
 
@@ -240,17 +331,16 @@ val_dataloader = dict(
         type='VADCustomNuScenesDataset',
         data_root=data_root,
         ann_file=data_root + 'vad_nuscenes_infos_temporal_val.pkl',
-        pipeline=val_pipeline,
+        pipeline=test_pipeline,
         metainfo=dict(classes=class_names),
         modality=dict(use_lidar=False, use_camera=True),
         test_mode=True,
         bev_size=(bev_h_, bev_w_),
-        pc_range=point_cloud_range))
-
+        pc_range=point_cloud_range,
+        map_classes=map_classes,
+        map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_line))
 test_dataloader = val_dataloader
 
-
-# Evaluation Hooks definition mapping blocks
 val_evaluator = dict(
     type='mmdet3d.NuScenesMetric',
     data_root=data_root,
@@ -258,15 +348,11 @@ val_evaluator = dict(
     metric='bbox')
 test_evaluator = val_evaluator
 
-# ------------------------------------------------------------------------------
-# 4. Re-engineered Optimization & Scheduling Configurations
-# ------------------------------------------------------------------------------
-# Encapsulated cleanly inside an optim_wrapper structural layout matrix
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(
         type='AdamW',
-        lr=2e-4, # Baseline base stage 1 perception tracking parameter sets
+        lr=2e-4,
         weight_decay=0.01),
     paramwise_cfg=dict(
         custom_keys={
@@ -274,7 +360,6 @@ optim_wrapper = dict(
         }),
     clip_grad=dict(max_norm=35, norm_type=2))
 
-# Multi-step parameterized decay scheduler tracking structures
 param_scheduler = [
     dict(
         type='LinearLR',
@@ -291,14 +376,10 @@ param_scheduler = [
         gamma=0.1)
 ]
 
-# Modern training state controllers loops configuration
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=total_epochs, val_interval=1)
 val_cfg = dict(type='ValLoop')
 test_cfg = dict(type='TestLoop')
 
-# ------------------------------------------------------------------------------
-# 5. Core Operational Runtimes & Checkpoint Handlers
-# ------------------------------------------------------------------------------
 default_hooks = dict(
     timer=dict(type='IterTimerHook'),
     logger=dict(type='LoggerHook', interval=50),
@@ -306,5 +387,10 @@ default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=3),
     sampler_seed=dict(type='DistSamplerSeedHook'))
 
-# Ensure visualization artifacts and temporary validation checkpoints remain local
+# Needed for DDP once you're back on multi-GPU -- VADHead's branches don't
+# necessarily all contribute to every forward pass's graph.
+find_unused_parameters = True
+
+custom_hooks = [dict(type='CustomSetEpochInfoHook')]
+
 work_dir = '/workspace/logs/outputs_stage_1'

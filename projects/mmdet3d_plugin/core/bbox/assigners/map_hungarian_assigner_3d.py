@@ -5,6 +5,7 @@ from mmdet.models.task_modules.assigners import AssignResult, BaseAssigner
 from mmdet.models.task_modules import BBOX_ASSIGNERS
 from mmdet.models.task_modules import build_match_cost
 from mmdet.models.layers import inverse_sigmoid
+from mmengine.structures import InstanceData
 
 from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 from projects.mmdet3d_plugin.VAD.utils.map_utils import (
@@ -113,8 +114,16 @@ class MapHungarianAssigner3D(BaseAssigner):
                 num_gts, assigned_gt_inds, None, labels=assigned_labels), None
 
         # 2. compute the weighted costs
+        # MMDetection 3.x / MMEngine Core Compatibility Wrap
+        # Wrap raw prediction tensors into an InstanceData container *BEFORE* calling cost submodules
+        pred_instances = InstanceData()
+        pred_instances.scores = cls_pred
+
+        gt_instances = InstanceData()
+        gt_instances.labels = gt_labels.long()
+
         # classification and bboxcost.
-        cls_cost = self.cls_cost(cls_pred, gt_labels)
+        cls_cost = self.cls_cost(pred_instances, gt_instances)
         # regression L1 cost
         
         normalized_gt_bboxes = normalize_2d_bbox(gt_bboxes, self.pc_range)
@@ -137,7 +146,9 @@ class MapHungarianAssigner3D(BaseAssigner):
         pts_cost, order_index = torch.min(pts_cost_ordered, 2)
         
         bboxes = denormalize_2d_bbox(bbox_pred, self.pc_range)
-        iou_cost = self.iou_cost(bboxes, gt_bboxes)
+        pred_instances.bboxes = bboxes
+        gt_instances.bboxes = gt_bboxes
+        iou_cost = self.iou_cost(pred_instances, gt_instances)
         # weighted sum of above three costs
         cost = cls_cost + reg_cost + iou_cost + pts_cost
         
@@ -157,6 +168,6 @@ class MapHungarianAssigner3D(BaseAssigner):
         assigned_gt_inds[:] = 0
         # assign foregrounds based on matching results
         assigned_gt_inds[matched_row_inds] = matched_col_inds + 1
-        assigned_labels[matched_row_inds] = gt_labels[matched_col_inds]
+        assigned_labels[matched_row_inds] = gt_labels[matched_col_inds].long()
         return AssignResult(
             num_gts, assigned_gt_inds, None, labels=assigned_labels), order_index
