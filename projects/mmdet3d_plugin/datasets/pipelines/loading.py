@@ -388,3 +388,11 @@ class CustomLoadPointsFromFile:
         results["points"] = points
 
         return results
+
+
+@TRANSFORMS.register_module()
+class LoadHeightSemanticGT(object):
+    def __call__(self, results):
+        # load the cached array for results['sample_idx'] / results['token']
+        # attach as results['height_gt'], results['semantic_gt']
+        return results

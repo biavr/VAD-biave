@@ -33,13 +33,15 @@ map_classes = ['divider', 'ped_crossing', 'boundary']
 map_num_classes = len(map_classes)
 map_fixed_ptsnum_per_line = 20  # must match map_num_pts_per_gt_vec below
 
+# --- tiny: lighter backbone, single BEV feature level, smaller BEV grid,
+# fewer queries and fewer transformer layers than VAD_base_stage_1_updated.py ---
 _dim_ = 256
 _pos_dim_ = _dim_ // 2
 _ffn_dim_ = _dim_ * 2
-_num_levels_ = 4
-bev_h_ = 200
-bev_w_ = 200
-queue_length = 4
+_num_levels_ = 1
+bev_h_ = 100
+bev_w_ = 100
+queue_length = 3
 total_epochs = 15
 
 data_root = '/workspace/datasets/nuscenes/v1.0-trainval/'
@@ -56,17 +58,17 @@ model = dict(
     video_test_mode=True,
     img_backbone=dict(
         type='mmdet.ResNet',
-        depth=101,
+        depth=50,
         num_stages=4,
-        out_indices=(1, 2, 3),
+        out_indices=(3,),
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=False),
         norm_eval=True,
         style='pytorch',
-        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet101')),
+        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet50')),
     img_neck=dict(
         type='mmdet.FPN',
-        in_channels=[512, 1024, 2048],
+        in_channels=[2048],
         out_channels=_dim_,
         start_level=0,
         add_extra_convs='on_output',
@@ -74,7 +76,7 @@ model = dict(
         relu_before_extra_convs=True),
     pts_bbox_head=dict(
         type='VADHead',
-        num_query=900,
+        num_query=300,
         num_classes=num_classes,
         in_channels=_dim_,
         embed_dims=_dim_,
@@ -109,10 +111,10 @@ model = dict(
             embed_dims=_dim_,
             num_feature_levels=_num_levels_,
             num_cams=6,
-            two_stage_num_proposals=900,
+            two_stage_num_proposals=300,
             encoder=dict(
                 type='BEVFormerEncoder',
-                num_layers=6,
+                num_layers=3,
                 pc_range=point_cloud_range,
                 num_points_in_pillar=4,
                 transformerlayers=dict(
@@ -137,11 +139,10 @@ model = dict(
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm'))),
             decoder=dict(
                 type='DetectionTransformerDecoder',
-                num_layers=6,
+                num_layers=3,
                 return_intermediate=True,
                 transformerlayers=dict(
                     type='BaseTransformerLayer',
-                    # batch_first=True,  
                     attn_cfgs=[
                         dict(
                             type='MultiheadAttention',
@@ -158,7 +159,7 @@ model = dict(
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm'))),
             map_decoder=dict(
                 type='MapDetectionTransformerDecoder',
-                num_layers=6,
+                num_layers=3,
                 return_intermediate=True,
                 transformerlayers=dict(
                     type='BaseTransformerLayer',
@@ -285,7 +286,7 @@ train_pipeline = [
     dict(type='mmdet3d.LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=True),
     dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='projects.mmdet3d_plugin.datasets.pipelines.CustomObjectNameFilter', classes=class_names),
-    dict(type='projects.mmdet3d_plugin.datasets.pipelines.RandomScaleImageMultiViewImage', scales=[0.8]),
+    dict(type='projects.mmdet3d_plugin.datasets.pipelines.RandomScaleImageMultiViewImage', scales=[0.4]),
     dict(type='mmdet3d.Pack3DDetInputs',
          keys=['img', 'gt_bboxes_3d', 'gt_labels_3d'],
          meta_keys=[
@@ -303,8 +304,16 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
+    # NOTE: batch_size>1 reliably produces NaN predictions within the first
+    # ~250 iterations (confirmed independent of AMP and of LR -- it crashed
+    # identically at lr=8e-4 w/ AMP, lr=2e-4 w/ AMP, and lr=2e-4 in plain
+    # fp32). VADCustomNuScenesDataset's per-sample map/instance handling was
+    # evidently only ever built and tested at batch_size=1; something in that
+    # path (likely GT map-vector padding/collation across a batch) breaks
+    # when batch_size>1. To get more throughput, use more GPUs instead (each
+    # still running batch_size=1) rather than increasing this value.
     batch_size=1,
-    num_workers=4,
+    num_workers=8,
     persistent_workers=True,
     sampler=dict(type='mmengine.DefaultSampler', shuffle=True),
     dataset=dict(
@@ -350,10 +359,18 @@ val_evaluator = dict(
 test_evaluator = val_evaluator
 
 optim_wrapper = dict(
-    type='OptimWrapper', 
-    # type='AmpOptimWrapper', # faster, fp16 instead of fp32
+    # NOTE: AmpOptimWrapper (fp16) caused grad_norm to go NaN at iter ~250-600
+    # across two separate runs, at different LRs and before/after warmup --
+    # the common factor was AMP itself, likely fp16 overflow/underflow in one
+    # of the custom ops (deformable attention or a map/chamfer loss). Back to
+    # plain fp32 until that's root-caused; batch_size=4 alone is unaffected.
+    type='OptimWrapper',
     optimizer=dict(
         type='AdamW',
+        # NOTE: do not scale this with batch_size. 8e-4 (linear-scaled for
+        # batch_size 1->4) caused grad_norm to go NaN right after warmup
+        # ended (iter ~500), which crashed the Hungarian map assigner a
+        # hundred-odd iterations later. 2e-4 is the proven-stable value.
         lr=2e-4,
         weight_decay=0.01),
     paramwise_cfg=dict(
@@ -407,4 +424,4 @@ find_unused_parameters = True
 
 custom_hooks = [dict(type='CustomSetEpochInfoHook')]
 
-work_dir = '/workspace/logs/outputs_stage_1'
+work_dir = '/workspace/logs/outputs_tiny_stage_1'
