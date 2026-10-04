@@ -6,3 +6,4 @@ from .VAD import VAD
 from .VAD_head import VADHead
 from .VAD_transformer import VADPerceptionTransformer, \
         CustomTransformerDecoder, MapDetectionTransformerDecoder
+from .occupancy_head import VADOccHead

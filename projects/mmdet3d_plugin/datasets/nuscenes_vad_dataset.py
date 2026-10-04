@@ -1041,6 +1041,7 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         padding_value=-10000,
         use_pkl_result=False,
         custom_eval_version='vad_nusc_detection_cvpr_2019',
+        occ_gt_root=None,
         *args,
         **kwargs
     ):
@@ -1070,6 +1071,19 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         self.with_attr = with_attr
         self.fut_ts = fut_ts
         self.use_pkl_result = use_pkl_result
+        # Directory of {sample_token}.npz files from occupancy_gt_generator.py.
+        # None (the default) disables occupancy supervision entirely.
+        self.occ_gt_root = occ_gt_root
+        # List the directory once at init instead of stat-ing a file per
+        # sample per epoch: occ_gt_root lives on an NFS mount, and with
+        # num_workers processes x world_size GPUs all issuing that stat
+        # independently every iteration, it's a lot of small-file metadata
+        # traffic for what is -- for most samples -- a negative lookup.
+        self._occ_gt_tokens = set()
+        if self.occ_gt_root is not None and os.path.isdir(self.occ_gt_root):
+            self._occ_gt_tokens = {
+                f[:-len('.npz')] for f in os.listdir(self.occ_gt_root) if f.endswith('.npz')
+            }
 
         self.custom_eval_version = custom_eval_version
         # Check if config exists.
@@ -1284,6 +1298,42 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         return raw_data_list
 
 
+    @staticmethod
+    def _nearest_resize(grid, out_h, out_w):
+        """Nearest-neighbor resize of a 2D array, no extra dependencies.
+
+        Used for both the class grid (must stay exact integer labels) and
+        the height grid (keeps it simple and avoids blending across the
+        IGNORE_CLASS sentinel / NaN that bilinear interpolation would cause).
+        """
+        in_h, in_w = grid.shape
+        row_idx = (np.arange(out_h) * in_h / out_h).astype(np.int64).clip(0, in_h - 1)
+        col_idx = (np.arange(out_w) * in_w / out_w).astype(np.int64).clip(0, in_w - 1)
+        return grid[row_idx][:, col_idx]
+
+    def get_occ_gt(self, sample_token):
+        """Load this sample's occupancy GT (occupancy_gt_generator.py output)
+        and resize it to self.bev_size, so it lines up with the BEV feature
+        map the occupancy head predicts on.
+
+        Returns:
+            (class_grid, height_grid) as float32 np.ndarrays of shape
+            self.bev_size, or (None, None) if occupancy supervision is
+            disabled (occ_gt_root is None) or this sample has no GT file
+            yet (e.g. its lidarseg label hasn't been downloaded -- see
+            occupancy_gt_generator.py's completeness caveat).
+        """
+        if self.occ_gt_root is None or sample_token not in self._occ_gt_tokens:
+            return None, None
+        npz_path = os.path.join(self.occ_gt_root, f'{sample_token}.npz')
+        if not os.path.exists(npz_path):
+            return None, None
+        data = np.load(npz_path)
+        bev_h, bev_w = self.bev_size
+        class_grid = self._nearest_resize(data['class_grid'], bev_h, bev_w).astype(np.float32)
+        height_grid = self._nearest_resize(data['height_grid'], bev_h, bev_w).astype(np.float32)
+        return class_grid, height_grid
+
     def prepare_train_data(self, index):
         """
         Training data preparation.
@@ -1425,6 +1475,14 @@ class VADCustomNuScenesDataset(NuScenesDataset):
             data_sample.set_metainfo(plan_dict)
             if 'img_metas' in data_sample.metainfo:
                 data_sample.metainfo['img_metas'].update(plan_dict)
+
+        # 9. Attach occupancy GT (no-op if occ_gt_root is unset)
+        class_grid, height_grid = self.get_occ_gt(raw_info['token'])
+        if class_grid is not None:
+            data_sample.set_metainfo({
+                'occ_class_grid': class_grid,
+                'occ_height_grid': height_grid,
+            })
 
         return packed_results
 

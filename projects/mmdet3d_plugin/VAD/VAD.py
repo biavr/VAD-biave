@@ -59,7 +59,8 @@ class VAD(MVXTwoStageDetector):
                  pretrained=None,
                  video_test_mode=False,
                  fut_ts=6,
-                 fut_mode=6
+                 fut_mode=6,
+                 occ_head=None
                  ):
 
         super(VAD,
@@ -95,6 +96,11 @@ class VAD(MVXTwoStageDetector):
         }
 
         self.planning_metric = None
+
+        # Auxiliary occupancy head: optional, reuses the same BEV feature
+        # map pts_bbox_head already computes (outs['bev_embed']). Entirely
+        # inert if occ_head is not set in the config.
+        self.occ_head = MODELS.build(occ_head) if occ_head is not None else None
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
@@ -159,7 +165,9 @@ class VAD(MVXTwoStageDetector):
                           ego_fut_masks=None,
                           ego_fut_cmd=None,
                           ego_lcf_feat=None,
-                          gt_attr_labels=None):
+                          gt_attr_labels=None,
+                          occ_class_grid=None,
+                          occ_height_grid=None):
         """Forward function'
         Args:
             pts_feats (list[torch.Tensor]): Features of point cloud branch
@@ -182,6 +190,18 @@ class VAD(MVXTwoStageDetector):
             outs, ego_fut_trajs, ego_fut_masks, ego_fut_cmd, gt_attr_labels
         ]
         losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
+
+        if self.occ_head is not None and occ_class_grid is not None:
+            bev_embed = outs['bev_embed']  # (bev_h*bev_w, bs, embed_dims)
+            bs = bev_embed.shape[1]
+            bev_h, bev_w = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
+            bev_feat = bev_embed.permute(1, 0, 2).reshape(
+                bs, bev_h, bev_w, -1).permute(0, 3, 1, 2)  # (bs, C, bev_h, bev_w)
+            cls_logits, height_pred = self.occ_head(bev_feat)
+            occ_losses = self.occ_head.loss(
+                cls_logits, height_pred, occ_class_grid, occ_height_grid)
+            losses.update(occ_losses)
+
         return losses
 
     def forward_dummy(self, img):
@@ -415,76 +435,6 @@ class VAD(MVXTwoStageDetector):
             self.train()
             return prev_bev
 
-    # @auto_fp16(apply_to=('img', 'points'))
-    # @force_fp32(apply_to=('img','points','prev_bev'))
-    # def forward_train(self,
-    #                   points=None,
-    #                   img_metas=None,
-    #                   gt_bboxes_3d=None,
-    #                   gt_labels_3d=None,
-    #                   map_gt_bboxes_3d=None,
-    #                   map_gt_labels_3d=None,
-    #                   gt_labels=None,
-    #                   gt_bboxes=None,
-    #                   img=None,
-    #                   proposals=None,
-    #                   gt_bboxes_ignore=None,
-    #                   map_gt_bboxes_ignore=None,
-    #                   img_depth=None,
-    #                   img_mask=None,
-    #                   ego_his_trajs=None,
-    #                   ego_fut_trajs=None,
-    #                   ego_fut_masks=None,
-    #                   ego_fut_cmd=None,
-    #                   ego_lcf_feat=None,
-    #                   gt_attr_labels=None
-    #                   ):
-    #     """Forward training function.
-    #     Args:
-    #         points (list[torch.Tensor], optional): Points of each sample.
-    #             Defaults to None.
-    #         img_metas (list[dict], optional): Meta information of each sample.
-    #             Defaults to None.
-    #         gt_bboxes_3d (list[:obj:`BaseInstance3DBoxes`], optional):
-    #             Ground truth 3D boxes. Defaults to None.
-    #         gt_labels_3d (list[torch.Tensor], optional): Ground truth labels
-    #             of 3D boxes. Defaults to None.
-    #         gt_labels (list[torch.Tensor], optional): Ground truth labels
-    #             of 2D boxes in images. Defaults to None.
-    #         gt_bboxes (list[torch.Tensor], optional): Ground truth 2D boxes in
-    #             images. Defaults to None.
-    #         img (torch.Tensor optional): Images of each sample with shape
-    #             (N, C, H, W). Defaults to None.
-    #         proposals ([list[torch.Tensor], optional): Predicted proposals
-    #             used for training Fast RCNN. Defaults to None.
-    #         gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
-    #             2D boxes in images to be ignored. Defaults to None.
-    #     Returns:
-    #         dict: Losses of different branches.
-    #     """
-        
-    #     len_queue = img.size(1)
-    #     prev_img = img[:, :-1, ...]
-    #     img = img[:, -1, ...]
-
-    #     prev_img_metas = copy.deepcopy(img_metas)
-    #     # prev_bev = self.obtain_history_bev(prev_img, prev_img_metas)
-    #     # import pdb;pdb.set_trace()
-    #     prev_bev = self.obtain_history_bev(prev_img, prev_img_metas) if len_queue > 1 else None
-
-    #     img_metas = [each[len_queue-1] for each in img_metas]
-    #     img_feats = self.extract_feat(img=img, img_metas=img_metas)
-    #     losses = dict()
-    #     losses_pts = self.forward_pts_train(img_feats, gt_bboxes_3d, gt_labels_3d,
-    #                                         map_gt_bboxes_3d, map_gt_labels_3d, img_metas,
-    #                                         gt_bboxes_ignore, map_gt_bboxes_ignore, prev_bev,
-    #                                         ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
-    #                                         ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
-    #                                         ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels)
-
-    #     losses.update(losses_pts)
-    #     return losses
-
     @force_fp32(apply_to=('img','points','prev_bev'))
     def forward_train(self,
                       img=None,
@@ -550,6 +500,31 @@ class VAD(MVXTwoStageDetector):
         ego_lcf_feat = torch.stack([safe_tensor(ds, 'ego_lcf_feat', (9,)) for ds in data_samples])
         gt_attr_labels = [ds.get('gt_attr_labels') for ds in data_samples]
 
+        occ_class_grid = None
+        occ_height_grid = None
+        if self.occ_head is not None:
+            from projects.mmdet3d_plugin.VAD.occupancy_head import IGNORE_CLASS
+            bev_h, bev_w = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
+
+            def occ_grid_tensor(ds, key, fill_value):
+                val = ds.get(key)
+                if val is None:
+                    # No occupancy GT for this sample (e.g. lidarseg label
+                    # file not downloaded yet) -- an all-ignored grid
+                    # contributes zero loss, it must NOT default to zeros,
+                    # which would wrongly supervise "class 0 everywhere".
+                    return torch.full((bev_h, bev_w), fill_value, dtype=torch.float32).to(device)
+                if not torch.is_tensor(val):
+                    val = torch.as_tensor(val)
+                return val.to(device).float()
+
+            occ_class_grid = torch.stack([
+                occ_grid_tensor(ds, 'occ_class_grid', IGNORE_CLASS) for ds in data_samples
+            ]).long()
+            occ_height_grid = torch.stack([
+                occ_grid_tensor(ds, 'occ_height_grid', 0.0) for ds in data_samples
+            ])
+
         # Proceed with legacy logic...
         len_queue = img.size(1)
 
@@ -569,7 +544,8 @@ class VAD(MVXTwoStageDetector):
             prev_bev=prev_bev,
             ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
             ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
-            ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels)
+            ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels,
+            occ_class_grid=occ_class_grid, occ_height_grid=occ_height_grid)
 
         losses.update(losses_pts)
         return losses
@@ -1024,57 +1000,6 @@ class VAD(MVXTwoStageDetector):
                         metric_dict['MR_'+box_name] += 1
 
         return metric_dict
-
-    ### same planning metric as stp3
-    # def compute_planner_metric_stp3(
-    #     self,
-    #     pred_ego_fut_trajs,
-    #     gt_ego_fut_trajs,
-    #     gt_agent_boxes,
-    #     gt_agent_feats,
-    #     fut_valid_flag
-    # ):
-    #     """Compute planner metric for one sample same as stp3."""
-    #     metric_dict = {
-    #         'plan_L2_1s':0,
-    #         'plan_L2_2s':0,
-    #         'plan_L2_3s':0,
-    #         'plan_obj_col_1s':0,
-    #         'plan_obj_col_2s':0,
-    #         'plan_obj_col_3s':0,
-    #         'plan_obj_box_col_1s':0,
-    #         'plan_obj_box_col_2s':0,
-    #         'plan_obj_box_col_3s':0,
-    #     }
-    #     metric_dict['fut_valid_flag'] = fut_valid_flag
-    #     future_second = 3
-    #     assert pred_ego_fut_trajs.shape[0] == 1, 'only support bs=1'
-    #     if self.planning_metric is None:
-    #         self.planning_metric = PlanningMetric()
-    #     segmentation, pedestrian = self.planning_metric.get_label(
-    #         gt_agent_boxes, gt_agent_feats)
-    #     occupancy = torch.logical_or(segmentation, pedestrian)
-
-    #     for i in range(future_second):
-    #         if fut_valid_flag:
-    #             cur_time = (i+1)*2
-    #             traj_L2 = self.planning_metric.compute_L2(
-    #                 pred_ego_fut_trajs[0, :cur_time].detach().to(gt_ego_fut_trajs.device),
-    #                 gt_ego_fut_trajs[0, :cur_time]
-    #             )
-    #             obj_coll, obj_box_coll = self.planning_metric.evaluate_coll(
-    #                 pred_ego_fut_trajs[:, :cur_time].detach(),
-    #                 gt_ego_fut_trajs[:, :cur_time],
-    #                 occupancy)
-    #             metric_dict['plan_L2_{}s'.format(i+1)] = traj_L2
-    #             metric_dict['plan_obj_col_{}s'.format(i+1)] = obj_coll.mean().item()
-    #             metric_dict['plan_obj_box_col_{}s'.format(i+1)] = obj_box_coll.mean().item()
-    #         else:
-    #             metric_dict['plan_L2_{}s'.format(i+1)] = 0.0
-    #             metric_dict['plan_obj_col_{}s'.format(i+1)] = 0.0
-    #             metric_dict['plan_obj_box_col_{}s'.format(i+1)] = 0.0
-            
-    #     return metric_dict
 
     def compute_planner_metric_stp3(
         self,
