@@ -1592,7 +1592,14 @@ class VADCustomNuScenesDataset(NuScenesDataset):
         if fallback_lidar2img is None and 'img_metas' in current_frame:
             fallback_lidar2img = current_frame['img_metas'].get('lidar2img')
         for i, each in enumerate(queue):
+            # Pack3DDetInputs (the pipeline's last step) nests the actual
+            # image tensor under each['inputs']['img'], not a top-level
+            # each['img'] -- that key has never existed post-migration, so
+            # this used to silently fall through to the zeros fallback for
+            # every single frame. Check the real location first.
             img = each.get('img', None)
+            if img is None and isinstance(each.get('inputs'), dict):
+                img = each['inputs'].get('img')
             if img is None:
                 img = torch.zeros((6, 3, 480, 800))
             if isinstance(img, list):
@@ -1604,8 +1611,15 @@ class VADCustomNuScenesDataset(NuScenesDataset):
 
             if hasattr(img, 'data'): img = img.data # Handle legacy DC
             imgs_list.append(img)
-            # Metadata in 1.x is the dict itself, or each['img_metas'] in legacy
-            metas = copy.deepcopy(each.get('img_metas', each))
+            # Metadata in 1.x is the dict itself, or each['img_metas'] in
+            # legacy; post-migration it lives on the packed data_sample's
+            # metainfo (same place get_ref_matrix already reads above).
+            if 'img_metas' in each:
+                metas = copy.deepcopy(each['img_metas'])
+            elif isinstance(each.get('data_samples'), object) and hasattr(each['data_samples'], 'metainfo'):
+                metas = copy.deepcopy(each['data_samples'].metainfo)
+            else:
+                metas = copy.deepcopy(each)
             curr_lidar2img = metas.get('lidar2img', anchor_lidar2img)
             if 'lidar2img' not in metas or metas['lidar2img'] is None:
                 metas['lidar2img'] = np.array(fallback_lidar2img, dtype=np.float32)

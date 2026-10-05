@@ -550,6 +550,63 @@ class VAD(MVXTwoStageDetector):
         losses.update(losses_pts)
         return losses
 
+    @torch.no_grad()
+    def predict_occ(self, img, data_samples):
+        """Run the occupancy head on a single sample and return its raw
+        prediction, for qualitative inspection -- not part of the
+        train_step/test_step pipeline (which has no occupancy output wired
+        in yet; see tools/analysis_tools/visualize_occupancy.py).
+
+        Mirrors forward_train's own data unpacking (img_metas, ego state,
+        the temporal queue's prev_bev) since that's the only place this
+        exact extraction already lives, but stops at the occ_head's output
+        instead of computing any loss.
+
+        Args:
+            img: (1, queue_length, num_cams, C, H, W), as produced by the
+                dataset's own collation (add the batch dim yourself if
+                calling with a single raw dataset[idx] sample).
+            data_samples: length-1 list matching forward_train's own input.
+
+        Returns:
+            cls_logits: (1, num_classes, bev_h, bev_w)
+            height_pred: (1, bev_h, bev_w)
+        """
+        assert self.occ_head is not None, 'occ_head is not configured for this model'
+        device = next(self.parameters()).device
+        img = img.to(device).float()
+
+        img_metas = [ds.get('img_metas') for ds in data_samples]
+
+        def safe_tensor(ds, key, shape_if_none):
+            val = ds.get(key)
+            if val is None:
+                return torch.zeros(shape_if_none).to(device)
+            if not torch.is_tensor(val):
+                val = torch.as_tensor(val)
+            return val.to(device).float()
+
+        ego_his_trajs = torch.stack([safe_tensor(ds, 'ego_his_trajs', (1, 2)) for ds in data_samples])
+        ego_lcf_feat = torch.stack([safe_tensor(ds, 'ego_lcf_feat', (9,)) for ds in data_samples])
+
+        len_queue = img.size(1)
+        prev_img = img[:, :-1, ...]
+        img_curr = img[:, -1, ...]
+        prev_img_metas = copy.deepcopy(img_metas)
+        prev_bev = self.obtain_history_bev(prev_img, prev_img_metas) if len_queue > 1 else None
+        img_metas_curr = [each[len_queue - 1] for each in img_metas]
+
+        img_feats = self.extract_feat(img=img_curr, img_metas=img_metas_curr)
+        outs = self.pts_bbox_head(img_feats, img_metas_curr, prev_bev,
+                                  ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat)
+
+        bev_embed = outs['bev_embed']
+        bs = bev_embed.shape[1]
+        bev_h, bev_w = self.pts_bbox_head.bev_h, self.pts_bbox_head.bev_w
+        bev_feat = bev_embed.permute(1, 0, 2).reshape(
+            bs, bev_h, bev_w, -1).permute(0, 3, 1, 2)
+        return self.occ_head(bev_feat)
+
     def forward_test(
         self,
         img_metas,
