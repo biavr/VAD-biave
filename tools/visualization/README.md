@@ -115,6 +115,55 @@ for that cell. Boxes use `class_ids` against the same `colors.py` palette as
 loaders share colors/labels automatically. Empty (`255`) cells are skipped.
 Logged at entity path `world/occupancy`.
 
+## Visualizing a model's predictions over a sequence: `nuscenes_rerun.sequence`
+
+The two loaders above only show what's already on disk (raw GT files). To
+compare a trained model's live occupancy predictions against GT, across a
+run of consecutive frames instead of one sample at a time, use the separate
+`sequence` tool instead (it needs to build the actual model, so it doesn't
+fit the "recognize this file, log it" shape the `LOADERS` registry above is
+for):
+
+```bash
+cd tools/visualization
+python3 -m nuscenes_rerun.sequence \
+    ../../projects/configs/VAD/VAD_tiny_stage_1_with_occ.py \
+    /workspace/logs/outputs_tiny_stage_1_with_occ/20261005_103643/epoch_3.pth \
+    --num-frames 20 --save sequence.rrd
+```
+
+This builds the dataset + model once, then walks forward through
+`--num-frames` consecutive samples (following each sample's `next` token, so
+it correctly crosses the dataset's own sample ordering) logging, per frame
+on a shared `frame` timeline:
+
+- all 6 camera images, at `camera/<CAM_NAME>`
+- GT occupancy (when that sample has any -- see caveat below), at
+  `world/occupancy_gt`
+- the model's live predicted occupancy (every frame, dense by construction),
+  at `world/occupancy_pred`
+
+GT and predicted boxes use the exact same box geometry and the same
+`colors.py` palette as the `occupancy` loader above, so the two are visually
+comparable, just toggle one or the other's visibility in the Viewer to
+compare a cell at a time, or leave both on and look for color mismatches.
+
+Without `--start-token`, it starts at the first sample that actually has
+occupancy GT (so frame 0 isn't empty); pass one to start somewhere specific.
+
+Open the result with `rerun sequence.rrd` (or drop `--save` to spawn a
+viewer directly; on a remote workstation, use `--connect` to a viewer you've
+already pointed a forwarded port at, the same way the live dashboard's port
+needs forwarding).
+
+**Caveat: occupancy GT coverage is sparse (~6% of samples in this dataset
+right now, per `occupancy_gt_generator.py`'s completeness note), and not
+concentrated in runs** -- across a 20-frame sequence, expect GT on maybe 1-2
+frames, not every frame. The predicted occupancy is still logged every
+frame regardless (it's a dense model output, not limited by GT
+availability), so you can still watch it stay stable/jump around frame to
+frame even without a GT overlay on most of them.
+
 ## Adding a new visualizer
 
 1. Add a `log_<thing>(path, **opts)` function to `core.py` (or a new sibling

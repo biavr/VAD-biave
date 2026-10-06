@@ -117,6 +117,15 @@
       </div>
     </section>
 
+    <section class="panel" id="occ-preview-section" style="margin-top:16px" hidden>
+      <h2>Occupancy prediction (live)</h2>
+      <p style="font-size:0.78rem;color:var(--text-muted);margin:0 0 10px">
+        Same fixed scene(s) each refresh, re-rendered from the newest checkpoint by
+        <code>occ_watcher.py</code> -- camera views, GT occupancy, and the model's current prediction side by side.
+      </p>
+      <div class="grid-multiples" id="occ-preview-grid" style="grid-template-columns:1fr"></div>
+    </section>
+
     <section style="margin-top:16px">
       <div class="grid-multiples" id="mini-grid"></div>
     </section>
@@ -297,6 +306,25 @@
       `<code>loss_map_bbox</code>, <code>loss_map_iou</code>, and all <code>loss_plan_*</code> terms are omitted when pinned at exactly 0.0.`;
   }
 
+  function renderOccPreviews(previews){
+    const section = document.getElementById("occ-preview-section");
+    const grid = document.getElementById("occ-preview-grid");
+    if (!previews || previews.length === 0) { section.hidden = true; return; }
+    section.hidden = false;
+    const cacheBust = Date.now();
+    if (grid.dataset.names !== previews.join(",")) {
+      // Set of tracked samples changed (watcher just started, or sample
+      // count changed) -- rebuild the <img> elements, not just their src.
+      grid.innerHTML = previews.map(name =>
+        `<img data-name="${name}" style="width:100%;border-radius:6px;border:1px solid var(--border)">`
+      ).join("");
+      grid.dataset.names = previews.join(",");
+    }
+    grid.querySelectorAll("img").forEach(img => {
+      img.src = `/occ_preview/${img.dataset.name}?t=${cacheBust}`;
+    });
+  }
+
   async function poll(){
     try {
       const res = await fetch("/data", {cache: "no-store"});
@@ -305,6 +333,7 @@
       CKPT_EPOCHS = payload.checkpoints || [];
       renderMeta(payload);
       render();
+      renderOccPreviews(payload.occ_previews);
       lastUpdate = Date.now();
       document.getElementById("status-dot").classList.add("live");
       document.getElementById("status-text").textContent = DATA.length ? "live" : "waiting for data";

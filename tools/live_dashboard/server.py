@@ -65,6 +65,20 @@ def find_checkpoints(work_dir: Path):
     return sorted(epochs)
 
 
+OCC_PREVIEW_NAME_RE = re.compile(r'^sample_\d+_latest\.png$')
+
+
+def find_occ_previews(work_dir: Path):
+    """Latest occupancy-prediction preview per tracked sample, written by
+    occ_watcher.py. Returns [] if that watcher isn't running (or hasn't
+    produced a first render yet) -- this is optional, not required for the
+    rest of the dashboard to work."""
+    preview_dir = work_dir / 'occ_preview'
+    if not preview_dir.is_dir():
+        return []
+    return sorted(f.name for f in preview_dir.iterdir() if OCC_PREVIEW_NAME_RE.match(f.name))
+
+
 def make_handler(work_dir: Path):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, ctype, body):
@@ -85,10 +99,22 @@ def make_handler(work_dir: Path):
                     'work_dir': str(work_dir),
                     'records': load_scalars(run_dir) if run_dir else [],
                     'checkpoints': find_checkpoints(work_dir),
+                    'occ_previews': find_occ_previews(work_dir),
                     'poll_ms': POLL_MS,
                     'scalars_path': str((run_dir / 'vis_data' / 'scalars.json')) if run_dir else None,
                 }
                 self._send(200, 'application/json', json.dumps(payload).encode())
+                return
+            if self.path.startswith('/occ_preview/'):
+                name = self.path[len('/occ_preview/'):].split('?', 1)[0]
+                if not OCC_PREVIEW_NAME_RE.match(name):
+                    self._send(404, 'text/plain', b'not found')
+                    return
+                img_path = work_dir / 'occ_preview' / name
+                if not img_path.is_file():
+                    self._send(404, 'text/plain', b'not found')
+                    return
+                self._send(200, 'image/png', img_path.read_bytes())
                 return
             self._send(404, 'text/plain', b'not found')
 

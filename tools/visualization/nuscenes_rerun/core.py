@@ -72,6 +72,63 @@ def log_lidarseg(
     rr.log(entity, rr.Points3D(positions[:n], class_ids=labels[:n]), static=static)
 
 
+def occupancy_grid_to_boxes(
+    class_grid: np.ndarray,
+    height_grid: np.ndarray,
+    pc_range,
+    cell_size,
+):
+    """Convert a `(H, W)` class/height occupancy grid into `rr.Boxes3D` arrays.
+
+    Shared by `log_occupancy` (reads a GT `.npz` off disk) and
+    `log_occupancy_grid` (takes already-computed arrays, e.g. a live model
+    prediction) so both log identically-shaped boxes and can be told apart
+    only by entity path / color, not by geometry. Returns `(mins, sizes,
+    class_ids)`, or `None` if every cell is `_OCCUPANCY_IGNORE_CLASS`.
+    """
+    xmin, ymin, zmin, _xmax, _ymax, _zmax = pc_range
+    cell_x, cell_y = cell_size
+
+    rows, cols = np.nonzero(class_grid != _OCCUPANCY_IGNORE_CLASS)
+    if len(rows) == 0:
+        return None
+
+    xs = xmin + cols * cell_x
+    ys = ymin + rows * cell_y
+    # Cell tops are measured/predicted heights and can't be trusted to sit
+    # above zmin (e.g. a below-range outlier, or an untrained model
+    # predicting something wild); clip so no box gets a negative height.
+    box_heights = np.clip(height_grid[rows, cols] - zmin, a_min=0.0, a_max=None)
+
+    mins = np.stack([xs, ys, np.full_like(xs, zmin)], axis=1).astype(np.float32)
+    sizes = np.stack([np.full_like(xs, cell_x), np.full_like(xs, cell_y), box_heights], axis=1).astype(np.float32)
+    return mins, sizes, class_grid[rows, cols]
+
+
+def log_occupancy_grid(
+    entity: str,
+    class_grid: np.ndarray,
+    height_grid: np.ndarray,
+    pc_range,
+    cell_size,
+    *,
+    static: bool = False,
+) -> bool:
+    """Log an already-computed occupancy grid (GT or a model prediction) as 3D boxes at `entity`.
+
+    Does not log an `AnnotationContext` itself (callers logging both a GT and
+    a predicted grid at sibling paths should log one shared context over
+    their common parent instead, since both use the same 32-class palette).
+    Returns whether anything was logged (`False` if every cell was ignored).
+    """
+    boxes = occupancy_grid_to_boxes(class_grid, height_grid, pc_range, cell_size)
+    if boxes is None:
+        return False
+    mins, sizes, class_ids = boxes
+    rr.log(entity, rr.Boxes3D(mins=mins, sizes=sizes, class_ids=class_ids), static=static)
+    return True
+
+
 def log_occupancy(
     path: Path,
     *,
@@ -95,27 +152,13 @@ def log_occupancy(
     with np.load(path) as data:
         class_grid = data["class_grid"]
         height_grid = data["height_grid"]
-        xmin, ymin, zmin, _xmax, _ymax, _zmax = data["pc_range"]
-        cell_x, cell_y = data["cell_size"]
+        pc_range = data["pc_range"]
+        cell_size = data["cell_size"]
 
     rr.log(entity, rr.AnnotationContext(annotation_context()), static=True)
 
-    rows, cols = np.nonzero(class_grid != _OCCUPANCY_IGNORE_CLASS)
-    if len(rows) == 0:
+    if not log_occupancy_grid(entity, class_grid, height_grid, pc_range, cell_size, static=static):
         log.warning("%s has no occupied cells", path)
-        return
-
-    xs = xmin + cols * cell_x
-    ys = ymin + rows * cell_y
-    # Cell tops are measured lidar heights and can't be trusted to sit above
-    # zmin (e.g. a below-range outlier surviving to a single-point column);
-    # clip so no box gets a negative height.
-    box_heights = np.clip(height_grid[rows, cols] - zmin, a_min=0.0, a_max=None)
-
-    mins = np.stack([xs, ys, np.full_like(xs, zmin)], axis=1).astype(np.float32)
-    sizes = np.stack([np.full_like(xs, cell_x), np.full_like(xs, cell_y), box_heights], axis=1).astype(np.float32)
-
-    rr.log(entity, rr.Boxes3D(mins=mins, sizes=sizes, class_ids=class_grid[rows, cols]), static=static)
 
 
 def _load_lidar_xyz(points_path: Path) -> np.ndarray:

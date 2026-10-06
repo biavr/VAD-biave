@@ -26,4 +26,38 @@ train_dataloader = dict(
     )
 )
 
+# Iteration-based (not epoch-based) checkpoints: the live dashboard's
+# occupancy watcher (tools/live_dashboard/occ_watcher.py) re-renders
+# predictions against whatever is newest, so this is what sets how often
+# that preview updates. max_keep_ckpts avoids filling the disk with one
+# checkpoint every 500 steps over a long run.
+default_hooks = dict(
+    checkpoint=dict(type='CheckpointHook', by_epoch=False, interval=500, max_keep_ckpts=3)
+)
+
+# Longer run than the base config's total_epochs=3: the occ head's star
+# artifact (see tools/live_dashboard -- camera-FOV-boundary bias in
+# BEVFormer's spatial cross-attention) was still visibly fading at epoch 3,
+# and occupancy GT only covers ~6% of samples, so it needs more passes over
+# the data than the other heads to converge. train_cfg/param_scheduler are
+# overridden directly (not just total_epochs) since the base config's
+# param_scheduler milestones are plain numbers computed from total_epochs at
+# load time, not a live reference that an override here would reach.
+train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=15, val_interval=1)
+param_scheduler = [
+    dict(
+        type='LinearLR',
+        start_factor=1.0 / 3,
+        by_epoch=False,
+        begin=0,
+        end=500),
+    dict(
+        type='MultiStepLR',
+        begin=0,
+        end=15,
+        by_epoch=True,
+        milestones=[7, 13],
+        gamma=0.1)
+]
+
 work_dir = '/workspace/logs/outputs_tiny_stage_1_with_occ'
