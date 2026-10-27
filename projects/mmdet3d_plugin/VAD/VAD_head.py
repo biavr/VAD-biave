@@ -1543,7 +1543,19 @@ class VADHead(DETRHead):
             loss_traj = torch.nan_to_num(loss_traj)
             loss_traj_cls = torch.nan_to_num(loss_traj_cls)
 
-        return loss_cls, loss_bbox, loss_traj, loss_traj_cls
+        # Diagnostic only (no 'loss' substring -> not summed into backprop,
+        # see mmengine.model.BaseModel.parse_losses -- just logged alongside
+        # the real losses so the dashboard can show whether classification
+        # confidence is actually learning to separate real detections from
+        # background, independent of whether loss_cls is decreasing).
+        with torch.no_grad():
+            cls_probs = cls_scores.sigmoid()
+            max_probs = cls_probs.max(dim=-1).values
+            pos_mask = labels != self.num_classes
+            diag_pos_score_mean = max_probs[pos_mask].mean() if pos_mask.any() else max_probs.new_tensor(0.0)
+            diag_neg_score_mean = max_probs[~pos_mask].mean() if (~pos_mask).any() else max_probs.new_tensor(0.0)
+
+        return loss_cls, loss_bbox, loss_traj, loss_traj_cls, diag_pos_score_mean, diag_neg_score_mean
 
     def get_best_fut_preds(self,
              traj_preds,
@@ -1570,7 +1582,14 @@ class VADHead(DETRHead):
         dist = torch.linalg.norm(cum_traj_targets[:, None, :, :] - cum_traj_preds, dim=-1)
         dist = dist * gt_fut_masks[:, None, :]
         dist = dist[..., -1]
-        dist[torch.isnan(dist)] = dist[torch.isnan(dist)] * 0
+        # `dist[nan] = dist[nan] * 0` is a no-op (nan * 0 == nan in IEEE 754),
+        # so NaN entries used to survive here -- and torch.argmin prefers NaN
+        # over any finite value, meaning a degenerate/NaN mode would get
+        # selected as "best" over a genuinely-matching finite mode. Replace
+        # with a large sentinel instead of 0 so a NaN mode is never mistaken
+        # for the minimum (0 would tie with, and lose ties to, a real exact
+        # match at index 0).
+        dist = torch.nan_to_num(dist, nan=1e6)
         min_mode_idxs = torch.argmin(dist, dim=-1).tolist()
         box_idxs = torch.arange(traj_preds.shape[0]).tolist()
         best_traj_preds = traj_preds[box_idxs, min_mode_idxs, :, :].reshape(-1, self.fut_ts*2)
@@ -1601,7 +1620,8 @@ class VADHead(DETRHead):
         dist = torch.linalg.norm(cum_traj_targets[:, None, :, :] - cum_traj_preds, dim=-1)
         dist = dist * gt_fut_masks[:, None, :]
         dist = dist[..., -1]
-        dist[torch.isnan(dist)] = dist[torch.isnan(dist)] * 0
+        # See get_best_fut_preds for why this must be a large sentinel, not 0.
+        dist = torch.nan_to_num(dist, nan=1e6)
         traj_labels = torch.argmin(dist, dim=-1)
         traj_labels[neg_inds] = self.fut_mode
 
@@ -1875,7 +1895,7 @@ class VADHead(DETRHead):
             gt_bboxes_ignore for _ in range(num_dec_layers)
         ]
 
-        losses_cls, losses_bbox, loss_traj, loss_traj_cls = multi_apply(
+        losses_cls, losses_bbox, loss_traj, loss_traj_cls, diag_pos_scores, diag_neg_scores = multi_apply(
             self.loss_single, all_cls_scores, all_bbox_preds, all_traj_preds,
             all_traj_cls_scores, all_gt_bboxes_list, all_gt_labels_list,
             all_gt_attr_labels_list, all_gt_bboxes_ignore_list)
@@ -1999,6 +2019,14 @@ class VADHead(DETRHead):
         loss_dict['loss_bbox'] = losses_bbox[-1]
         loss_dict['loss_traj'] = loss_traj[-1]
         loss_dict['loss_traj_cls'] = loss_traj_cls[-1]
+        # Diagnostic scalars (no 'loss' substring -> logged, not backpropped;
+        # see the investigation into why detection mAP stayed ~0 despite
+        # loss_cls decreasing -- these track whether the model is actually
+        # learning to score real detections higher than background, which
+        # loss_cls alone doesn't reveal).
+        loss_dict['diag_pos_score_mean'] = diag_pos_scores[-1]
+        loss_dict['diag_neg_score_mean'] = diag_neg_scores[-1]
+        loss_dict['diag_score_gap'] = diag_pos_scores[-1] - diag_neg_scores[-1]
         # loss from the last decoder layer
         loss_dict['loss_map_cls'] = map_losses_cls[-1]
         loss_dict['loss_map_bbox'] = map_losses_bbox[-1]

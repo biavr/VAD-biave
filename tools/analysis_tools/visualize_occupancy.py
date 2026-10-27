@@ -157,14 +157,17 @@ def render_sample(sample, cls_logits, height_pred, colormap, out_path, token):
     plt.close(fig)
 
 
-def build_dataset(cfg):
+def build_dataset(cfg, require_occ=True):
+    """require_occ=False for callers that only need the dataset/model
+    building machinery (e.g. det_watcher.py's detection-box preview) and
+    don't care whether this config has occupancy wired up at all."""
     dataset = DATASETS.build(cfg.train_dataloader.dataset)
-    if getattr(dataset, 'occ_gt_root', None) is None:
+    if require_occ and getattr(dataset, 'occ_gt_root', None) is None:
         raise RuntimeError('This config has no occ_gt_root set -- nothing to compare against.')
     return dataset
 
 
-def build_model(cfg, checkpoint_path, device):
+def build_model(cfg, checkpoint_path, device, require_occ=True):
     """Build once; call load_checkpoint again on the same model to pick up
     a newer checkpoint cheaply (used by the live dashboard's watcher, which
     re-renders on every new checkpoint without rebuilding the model)."""
@@ -172,7 +175,7 @@ def build_model(cfg, checkpoint_path, device):
     load_checkpoint(model, str(checkpoint_path), map_location='cpu')
     model.to(device)
     model.eval()
-    if model.occ_head is None:
+    if require_occ and model.occ_head is None:
         raise RuntimeError('This config has no occ_head configured.')
     return model
 

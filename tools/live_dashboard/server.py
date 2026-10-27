@@ -55,6 +55,27 @@ def load_scalars(run_dir: Path):
     return records
 
 
+ETA_RE = re.compile(r'eta:\s*(-?(?:\d+\s+days?,\s*)?\d+:\d{2}:\d{2})')
+ETA_TAIL_BYTES = 16384
+
+
+def find_latest_eta(run_dir: Path):
+    """Parse the most recent `eta: ...` string mmengine's LoggerHook prints
+    to this run's own text log -- not persisted to scalars.json, so this is
+    the one value not already available there. Only reads the last chunk of
+    the file (it can grow to tens of MB over a multi-day run) rather than
+    the whole thing every poll."""
+    log_path = run_dir / f'{run_dir.name}.log'
+    if not log_path.exists():
+        return None
+    size = log_path.stat().st_size
+    with open(log_path, 'rb') as f:
+        f.seek(max(0, size - ETA_TAIL_BYTES))
+        tail = f.read().decode('utf-8', errors='ignore')
+    matches = ETA_RE.findall(tail)
+    return matches[-1] if matches else None
+
+
 def find_checkpoints(work_dir: Path):
     epochs = set()
     if work_dir.is_dir():
@@ -79,6 +100,18 @@ def find_occ_previews(work_dir: Path):
     return sorted(f.name for f in preview_dir.iterdir() if OCC_PREVIEW_NAME_RE.match(f.name))
 
 
+DET_PREVIEW_NAME_RE = re.compile(r'^sample_\d+_latest\.png$')
+
+
+def find_det_previews(work_dir: Path):
+    """Same idea as find_occ_previews, but for det_watcher.py's predicted +
+    GT 3D detection box renders."""
+    preview_dir = work_dir / 'det_preview'
+    if not preview_dir.is_dir():
+        return []
+    return sorted(f.name for f in preview_dir.iterdir() if DET_PREVIEW_NAME_RE.match(f.name))
+
+
 def make_handler(work_dir: Path):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, ctype, body):
@@ -98,8 +131,10 @@ def make_handler(work_dir: Path):
                     'run': run_dir.name if run_dir else None,
                     'work_dir': str(work_dir),
                     'records': load_scalars(run_dir) if run_dir else [],
+                    'eta': find_latest_eta(run_dir) if run_dir else None,
                     'checkpoints': find_checkpoints(work_dir),
                     'occ_previews': find_occ_previews(work_dir),
+                    'det_previews': find_det_previews(work_dir),
                     'poll_ms': POLL_MS,
                     'scalars_path': str((run_dir / 'vis_data' / 'scalars.json')) if run_dir else None,
                 }
@@ -111,6 +146,17 @@ def make_handler(work_dir: Path):
                     self._send(404, 'text/plain', b'not found')
                     return
                 img_path = work_dir / 'occ_preview' / name
+                if not img_path.is_file():
+                    self._send(404, 'text/plain', b'not found')
+                    return
+                self._send(200, 'image/png', img_path.read_bytes())
+                return
+            if self.path.startswith('/det_preview/'):
+                name = self.path[len('/det_preview/'):].split('?', 1)[0]
+                if not DET_PREVIEW_NAME_RE.match(name):
+                    self._send(404, 'text/plain', b'not found')
+                    return
+                img_path = work_dir / 'det_preview' / name
                 if not img_path.is_file():
                     self._send(404, 'text/plain', b'not found')
                     return

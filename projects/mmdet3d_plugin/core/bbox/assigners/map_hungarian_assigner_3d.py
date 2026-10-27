@@ -157,6 +157,16 @@ class MapHungarianAssigner3D(BaseAssigner):
         if linear_sum_assignment is None:
             raise ImportError('Please run "pip install scipy" '
                               'to install scipy first.')
+        if torch.isnan(cost).any() or torch.isinf(cost).any():
+            # A cost component with weight=0.0 (e.g. iou_cost/reg_cost in this
+            # project's configs) still propagates NaN/Inf into the sum via
+            # 0.0 * nan == nan / 0.0 * inf == nan, even though it is meant to
+            # be a no-op -- mirror the guard already present in the sibling
+            # detection assigner (hungarian_assigner_3d.py) so a transient
+            # divergence in one query's prediction can't crash the whole
+            # matching step.
+            cost = torch.where(torch.isnan(cost), torch.tensor(1e5, dtype=cost.dtype), cost)
+            cost = torch.where(torch.isinf(cost), torch.tensor(1e5, dtype=cost.dtype), cost)
         matched_row_inds, matched_col_inds = linear_sum_assignment(cost)
         matched_row_inds = torch.from_numpy(matched_row_inds).to(
             bbox_pred.device)

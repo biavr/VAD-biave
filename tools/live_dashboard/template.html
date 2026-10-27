@@ -126,6 +126,15 @@
       <div class="grid-multiples" id="occ-preview-grid" style="grid-template-columns:1fr"></div>
     </section>
 
+    <section class="panel" id="det-preview-section" style="margin-top:16px" hidden>
+      <h2>Detection boxes (live)</h2>
+      <p style="font-size:0.78rem;color:var(--text-muted);margin:0 0 10px">
+        Same fixed scene(s) each refresh, re-rendered from the newest checkpoint by
+        <code>det_watcher.py</code> -- GT boxes (red) and the model's current predictions (green, score &gt; 0.2) projected onto all 6 cameras.
+      </p>
+      <div class="grid-multiples" id="det-preview-grid" style="grid-template-columns:1fr"></div>
+    </section>
+
     <section style="margin-top:16px">
       <div class="grid-multiples" id="mini-grid"></div>
     </section>
@@ -252,7 +261,9 @@
     ["loss_traj","agent traj"], ["loss_traj_cls","agent traj cls"],
     ["loss_map_cls","map cls"], ["loss_map_pts","map pts"],
     ["loss_map_dir","map dir"], ["grad_norm","grad norm"],
-    ["loss_occ_cls","occ cls"], ["loss_occ_height","occ height"]
+    ["loss_occ_cls","occ cls"], ["loss_occ_height","occ height"],
+    ["diag_pos_score_mean","diag: pos score"], ["diag_neg_score_mean","diag: neg score"],
+    ["diag_score_gap","diag: score gap (pos-neg)"]
   ];
   let miniBuilt = false;
   function ensureMiniPanels(){
@@ -299,6 +310,7 @@
       <span class="meta-chip">run <b>${payload.run || "–"}</b></span>
       <span class="meta-chip">watching <b>${payload.work_dir || "–"}</b></span>
       <span class="meta-chip">epoch <b>${latestEpoch}</b></span>
+      <span class="meta-chip">eta <b>${payload.eta || "–"}</b></span>
       <span class="meta-chip">checkpoints saved: <b>${(payload.checkpoints||[]).length ? payload.checkpoints.join(", ") : "none yet"}</b></span>
     `;
     document.getElementById("footer-note").innerHTML =
@@ -325,6 +337,23 @@
     });
   }
 
+  function renderDetPreviews(previews){
+    const section = document.getElementById("det-preview-section");
+    const grid = document.getElementById("det-preview-grid");
+    if (!previews || previews.length === 0) { section.hidden = true; return; }
+    section.hidden = false;
+    const cacheBust = Date.now();
+    if (grid.dataset.names !== previews.join(",")) {
+      grid.innerHTML = previews.map(name =>
+        `<img data-name="${name}" style="width:100%;border-radius:6px;border:1px solid var(--border)">`
+      ).join("");
+      grid.dataset.names = previews.join(",");
+    }
+    grid.querySelectorAll("img").forEach(img => {
+      img.src = `/det_preview/${img.dataset.name}?t=${cacheBust}`;
+    });
+  }
+
   async function poll(){
     try {
       const res = await fetch("/data", {cache: "no-store"});
@@ -334,6 +363,7 @@
       renderMeta(payload);
       render();
       renderOccPreviews(payload.occ_previews);
+      renderDetPreviews(payload.det_previews);
       lastUpdate = Date.now();
       document.getElementById("status-dot").classList.add("live");
       document.getElementById("status-text").textContent = DATA.length ? "live" : "waiting for data";

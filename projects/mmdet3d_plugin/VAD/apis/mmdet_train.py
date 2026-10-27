@@ -110,7 +110,15 @@ def custom_train_detector(model,
         work_dir=cfg.work_dir,
         train_cfg=cfg.train_cfg,
         log_processor=cfg.get('log_processor', dict(window_size=50)),
-        cfg=shadow_cfg, 
+        # NOTE: without this, Runner silently falls back to its own
+        # hardcoded default (interval=1, by_epoch=True, no max_keep_ckpts
+        # limit) and any config override to default_hooks (checkpoint
+        # cadence, etc.) is never applied -- it happened to go unnoticed
+        # because most configs here also use interval=1, until a config
+        # that deliberately wants a different cadence (e.g. iteration-based
+        # checkpoints for faster preview feedback) exposed it.
+        default_hooks=cfg.get('default_hooks'),
+        cfg=shadow_cfg,
     )
 
     # runner.timestamp = timestamp

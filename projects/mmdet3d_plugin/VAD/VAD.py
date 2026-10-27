@@ -323,47 +323,34 @@ class VAD(MVXTwoStageDetector):
 
             # Unpack and map metrics keys format natively
             _, evaluation_results = self.simple_test(img=img, data_samples=data_samples, **kwargs)
-            
-            # DUAL INTEGRATED STR/INT TOKEN TRANS-CODER BRIDGE
-            real_numeric_idx = None
-            nusc_string_token = None
 
-            if data_samples is not None and len(data_samples) > 0:
-                sample_obj = data_samples[0]
-                
-                # 1. Recover the unique string hash token
-                if hasattr(sample_obj, 'img_metas') and isinstance(sample_obj.img_metas, dict):
-                    nusc_string_token = sample_obj.img_metas.get('sample_idx', None)
-                elif hasattr(sample_obj, 'metainfo') and isinstance(sample_obj.metainfo, dict):
-                    nusc_string_token = sample_obj.metainfo.get('sample_idx', sample_obj.metainfo.get('sample_token', None))
-                
-                # 2. Track down the true sequential array position integer
-                if hasattr(sample_obj, 'sample_idx') and isinstance(sample_obj.sample_idx, int):
-                    real_numeric_idx = sample_obj.sample_idx
-                elif isinstance(sample_obj, dict) and isinstance(sample_obj.get('sample_idx'), int):
-                    real_numeric_idx = sample_obj['sample_idx']
-
-            # Cross-reference token fields to match string hashes to their integer indices if decoupled
-            try:
-                import inspect
-                for frame_info in inspect.stack():
-                    frame_self = frame_info.frame.f_locals.get('self', None)
-                    if frame_self.__class__.__name__ == 'NuScenesMetric' and hasattr(frame_self, 'data_infos'):
-                        if isinstance(nusc_string_token, str) and real_numeric_idx is None:
-                            for idx, info in enumerate(frame_self.data_infos):
-                                if info.get('token', '') == nusc_string_token:
-                                    real_numeric_idx = idx
-                                    break
-                        if isinstance(real_numeric_idx, int) and nusc_string_token is None:
-                            nusc_string_token = frame_self.data_infos[real_numeric_idx].get('token', None)
-                        break
-            except Exception:
-                pass
-
-            if real_numeric_idx is None or isinstance(real_numeric_idx, str):
-                real_numeric_idx = img_metas[0].get('sample_idx', 0) if img_metas else 0
-                if isinstance(real_numeric_idx, str):
-                    real_numeric_idx = 0
+            # STR/INT TOKEN BRIDGE
+            # nuscenes_vad_dataset.py's own convention (get_data_info(), etc.)
+            # is that the field literally named 'sample_idx' holds the sample's
+            # *string* nuScenes token, not a numeric dataset position -- see
+            # e.g. `data_info['sample_idx'] = info.get('token', ...)`. That's
+            # exactly what's sitting in img_metas[0]['sample_idx'] here, and
+            # it's the single reliable source for the real per-sample token
+            # (confirmed by direct inspection -- it varies correctly call to
+            # call; data_samples[0].metainfo has no top-level
+            # 'sample_idx'/'sample_token' at all, it's nested under
+            # metainfo['img_metas'][frame_i] instead).
+            #
+            # There used to be an inspect.stack() attempt here to resolve this
+            # string token to its integer dataset position by reaching into a
+            # live NuScenesMetric instance's data_infos. That can never work:
+            # mmengine's test loop calls model.test_step() (-> here) and
+            # evaluator.process() as separate, sequential steps, not nested --
+            # there is no NuScenesMetric anywhere on the call stack while
+            # predict() is running, so that lookup silently failed every time
+            # and fell back to a hardcoded 0, collapsing every single test
+            # sample to the same index. res['sample_token'] below is set
+            # correctly regardless (it never depended on that lookup); the
+            # string->index resolution now happens downstream in
+            # tools/test.py's patched_compute_metrics instead, where the real
+            # data_infos list is actually available in the same scope.
+            nusc_string_token = img_metas[0].get('sample_idx', None) if img_metas else None
+            real_numeric_idx = 0
             if nusc_string_token is None:
                 nusc_string_token = str(real_numeric_idx)
 

@@ -733,6 +733,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Visualize VAD predictions')
     parser.add_argument('--result-path', help='inference result file path')
     parser.add_argument('--save-path', help='the dir to save visualization results')
+    parser.add_argument('--max-frames', type=int, default=50,
+                         help='render at most this many resolved frames (0 = all of them, slowly). '
+                              'Default 50 keeps a full ~6000-sample val split from taking hours.')
     args = parser.parse_args()
 
     return args
@@ -820,12 +823,37 @@ if __name__ == '__main__':
     nusc = NuScenes(version='v1.0-trainval', dataroot='/workspace/datasets/nuscenes/v1.0-trainval', verbose=True)
     
     imgs = []
+    # mkdir must happen before VideoWriter() opens its output file below --
+    # cv2.VideoWriter silently fails (isOpened() == False, every .write() a
+    # no-op, no exception) when the target directory doesn't exist yet, which
+    # is exactly what was happening: this used to run once per loop
+    # iteration, after the VideoWriter below had already failed to open.
+    mmengine.mkdir_or_exist(out_path)
     fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
     video_path = osp.join(out_path, 'vis.mp4')
-    video = cv2.VideoWriter(video_path, fourcc, 10, (2933, 800), True)
+    # Must match the actual per-frame hconcat size below exactly -- cv2.VideoWriter
+    # silently no-ops every .write() call (no exception, isOpened() stays True)
+    # when the frame it's given doesn't match the size it was opened with. This
+    # was previously hardcoded to (2933, 800), 400px wider than CAM_GRID_SIZE[0] +
+    # BEV_CANVAS_SIZE[0] actually produce -- a leftover from some earlier version
+    # of the BEV canvas, silently discarding every single frame ever since.
+    CAM_GRID_SIZE = (2133, 800)
+    BEV_CANVAS_SIZE = (400, 800)
+    video_frame_size = (CAM_GRID_SIZE[0] + BEV_CANVAS_SIZE[0], CAM_GRID_SIZE[1])
+    video = cv2.VideoWriter(video_path, fourcc, 10, video_frame_size, True)
+
+    # A full val split is ~6000 samples, each needing 6 image loads + 6
+    # matplotlib savefig calls -- multiple hours to render in full. Cap it by
+    # default so the tool actually finishes; pass --max-frames 0 (or a bigger
+    # number) for the full sequence.
+    max_frames = getattr(args, 'max_frames', 50)
+    if max_frames and max_frames > 0:
+        sample_token_list = sample_token_list[:max_frames]
+        print(f"Capped to the first {len(sample_token_list)} of {len(bevformer_results['results'])} "
+              f"resolved frames (pass --max-frames 0 to render all of them, slowly).")
+
     print("Launching rendering loop across resolved sequences...")
     for id in tqdm(range(len(sample_token_list))):
-        mmengine.mkdir_or_exist(out_path)
         sample_token = sample_token_list[id]
         
         # 1. Bypassing render_sample_data & lidiar_render completely to avoid internal layout type mismatches
@@ -989,7 +1017,7 @@ if __name__ == '__main__':
                 raise ValueError("Error: Unknown sensor modality!")
 
         # 4. Generate Birds-Eye View Map canvas manually to replace the broken local render path
-        bev_canvas = np.zeros((800, 400, 3), dtype=np.uint8) + 40 # Dark Gray Background Matrix
+        bev_canvas = np.zeros((BEV_CANVAS_SIZE[1], BEV_CANVAS_SIZE[0], 3), dtype=np.uint8) + 40 # Dark Gray Background Matrix
         cv2.circle(bev_canvas, (200, 400), 5, (0, 0, 255), -1) # Draw Ego vehicle anchor dot
         
         # Project predicted bounding boxes coordinates down onto the BEV canvas
@@ -1010,8 +1038,7 @@ if __name__ == '__main__':
         cam_img_top = cv2.hconcat([cam_imgs[0], cam_imgs[1], cam_imgs[2]])
         cam_img_down = cv2.hconcat([cam_imgs[3], cam_imgs[4], cam_imgs[5]])
         cam_img = cv2.vconcat([cam_img_top, cam_img_down])
-        size = (2133, 800)
-        cam_img = cv2.resize(cam_img, size)
+        cam_img = cv2.resize(cam_img, CAM_GRID_SIZE)
         vis_img = cv2.hconcat([cam_img, sample_img])
 
         video.write(vis_img)

@@ -171,7 +171,7 @@ def parse_args():
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--local_rank', '--local-rank', dest='local_rank', type=int, default=0)
     parser.add_argument(
         '--autoscale-lr',
         action='store_true',
@@ -309,6 +309,18 @@ def main():
         test_cfg=cfg.model.get('test_cfg'))
     model.init_weights()
     # logger.info(f'Model:\n{model}')
+
+    frozen_prefixes = cfg.get('frozen_param_prefixes', None)
+    if frozen_prefixes:
+        n_frozen, n_trainable = 0, 0
+        for name, param in model.named_parameters():
+            if any(name.startswith(p) for p in frozen_prefixes):
+                param.requires_grad = False
+                n_frozen += 1
+            else:
+                n_trainable += 1
+        print(f"Froze {n_frozen} parameter tensors matching {frozen_prefixes}; "
+              f"{n_trainable} remain trainable.")
 
     print("Prepairing dataset...")
     # Old
